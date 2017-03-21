@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.5)
+project(bag_reader)
+find_package(rosbag_storage)
+find_package(roscpp_serialization)
+add_definitions(-std=c++14)
+include_directories(${rosbag_storage_INCLUDE_DIRS}, ${roscpp_serialization_INCLUDE_DIRS})
+add_executable(bag_reader.bin bag_reader.cpp)
+target_link_libraries(bag_reader ${rosbag_storage_LIBRARIES} ${roscpp_serialization_LIBRARIES})
