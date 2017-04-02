@@ -62,11 +62,13 @@ static std::shared_ptr<GroupNode> SetupSchema() {
       "boolean_field", Repetition::REQUIRED, Type::BOOLEAN, LogicalType::NONE));
 
   // Create a primitive node named 'int32_field' with type:INT32, repetition:REQUIRED,
-  // logical type:TIME_MILLIS
+  // logical type:TIME_MILLIS   <--- spark sql does not seem to support this type.
   fields.push_back(PrimitiveNode::Make(
-      "int32_field", Repetition::REQUIRED, Type::INT32, LogicalType::TIME_MILLIS));
+      "int32_field", Repetition::REQUIRED, Type::INT32, LogicalType::NONE));
 
   // Create a primitive node named 'int64_field' with type:INT64, repetition:REPEATED
+    // NB: repeated types become arrays when read by spark, and such types need extra processing
+    // when loading into MemSQL (and maybe Vertica)
   fields.push_back(PrimitiveNode::Make(
       "int64_field", Repetition::REPEATED, Type::INT64, LogicalType::NONE));
 
@@ -80,13 +82,15 @@ static std::shared_ptr<GroupNode> SetupSchema() {
       "double_field", Repetition::REQUIRED, Type::DOUBLE, LogicalType::NONE));
 
   // Create a primitive node named 'ba_field' with type:BYTE_ARRAY, repetition:OPTIONAL
+    // ba field gets converted to array type. some tools do not handle it.
   fields.push_back(PrimitiveNode::Make(
       "ba_field", Repetition::OPTIONAL, Type::BYTE_ARRAY, LogicalType::NONE));
 
+  // SparkSQL does not seem to support fixed length byte array.
   // Create a primitive node named 'flba_field' with type:FIXED_LEN_BYTE_ARRAY,
   // repetition:REQUIRED, field_length = FIXED_LENGTH
-  fields.push_back(PrimitiveNode::Make("flba_field", Repetition::REQUIRED,
-      Type::FIXED_LEN_BYTE_ARRAY, LogicalType::NONE, FIXED_LENGTH));
+  // fields.push_back(PrimitiveNode::Make("flba_field", Repetition::REQUIRED,
+  //     Type::FIXED_LEN_BYTE_ARRAY, LogicalType::NONE, FIXED_LENGTH));
 
   // Create a GroupNode named 'schema' using the primitive nodes defined above
   // This GroupNode is the root node of the schema tree
@@ -181,7 +185,7 @@ int main(int argc, char** argv) {
     }
 
     // Write the ByteArray column. Make every alternate values NULL
-    parquet::ByteArrayWriter* ba_writer =
+    parquet::ByteArrayWriter* ba_writer =rep
         static_cast<parquet::ByteArrayWriter*>(rg_writer->NextColumn());
     for (int i = 0; i < NUM_ROWS_PER_ROW_GROUP; i++) {
       parquet::ByteArray value;
@@ -200,17 +204,17 @@ int main(int argc, char** argv) {
       }
     }
 
-    // Write the FixedLengthByteArray column
-    parquet::FixedLenByteArrayWriter* flba_writer =
-        static_cast<parquet::FixedLenByteArrayWriter*>(rg_writer->NextColumn());
-    for (int i = 0; i < NUM_ROWS_PER_ROW_GROUP; i++) {
-      parquet::FixedLenByteArray value;
-      char v = static_cast<char>(i);
-      char flba[FIXED_LENGTH] = {v, v, v, v, v, v, v, v, v, v};
-      value.ptr = reinterpret_cast<const uint8_t*>(&flba[0]);
+    // // Write the FixedLengthByteArray column
+    // parquet::FixedLenByteArrayWriter* flba_writer =
+    //     static_cast<parquet::FixedLenByteArrayWriter*>(rg_writer->NextColumn());
+    // for (int i = 0; i < NUM_ROWS_PER_ROW_GROUP; i++) {
+    //   parquet::FixedLenByteArray value;
+    //   char v = static_cast<char>(i);
+    //   char flba[FIXED_LENGTH] = {v, v, v, v, v, v, v, v, v, v};
+    //   value.ptr = reinterpret_cast<const uint8_t*>(&flba[0]);
 
-      flba_writer->WriteBatch(1, nullptr, nullptr, &value);
-    }
+    //   flba_writer->WriteBatch(1, nullptr, nullptr, &value);
+    // }
 
     // Close the ParquetFileWriter
     file_writer->Close();
@@ -240,7 +244,7 @@ int main(int argc, char** argv) {
 
     // Get the number of Columns
     int num_columns = file_metadata->num_columns();
-    assert(num_columns == 8);
+    assert(num_columns == 7);
 
     // Iterate over all the RowGroups in the file
     for (int r = 0; r < num_row_groups; ++r) {
@@ -426,27 +430,27 @@ int main(int argc, char** argv) {
         i++;
       }
 
-      // Get the Column Reader for the FixedLengthByteArray column
-      column_reader = row_group_reader->Column(7);
-      parquet::FixedLenByteArrayReader* flba_reader =
-          static_cast<parquet::FixedLenByteArrayReader*>(column_reader.get());
-      // Read all the rows in the column
-      i = 0;
-      while (flba_reader->HasNext()) {
-        parquet::FixedLenByteArray value;
-        // Read one value at a time. The number of rows read is returned. values_read
-        // contains the number of non-null rows
-        rows_read = flba_reader->ReadBatch(1, nullptr, nullptr, &value, &values_read);
-        // Ensure only one value is read
-        assert(rows_read == 1);
-        // There are no NULL values in the rows written
-        assert(values_read == 1);
-        // Verify the value written
-        char v = static_cast<char>(i);
-        char expected_value[FIXED_LENGTH] = {v, v, v, v, v, v, v, v, v, v};
-        assert(memcmp(value.ptr, &expected_value[0], FIXED_LENGTH) == 0);
-        i++;
-      }
+      // // Get the Column Reader for the FixedLengthByteArray column
+      // column_reader = row_group_reader->Column(7);
+      // parquet::FixedLenByteArrayReader* flba_reader =
+      //     static_cast<parquet::FixedLenByteArrayReader*>(column_reader.get());
+      // // Read all the rows in the column
+      // i = 0;
+      // while (flba_reader->HasNext()) {
+      //   parquet::FixedLenByteArray value;
+      //   // Read one value at a time. The number of rows read is returned. values_read
+      //   // contains the number of non-null rows
+      //   rows_read = flba_reader->ReadBatch(1, nullptr, nullptr, &value, &values_read);
+      //   // Ensure only one value is read
+      //   assert(rows_read == 1);
+      //   // There are no NULL values in the rows written
+      //   assert(values_read == 1);
+      //   // Verify the value written
+      //   char v = static_cast<char>(i);
+      //   char expected_value[FIXED_LENGTH] = {v, v, v, v, v, v, v, v, v, v};
+      //   assert(memcmp(value.ptr, &expected_value[0], FIXED_LENGTH) == 0);
+      //   i++;
+      // }
     }
   } catch (const std::exception& e) {
     std::cerr << "Parquet read error: " << e.what() << std::endl;
