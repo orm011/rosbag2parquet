@@ -6,9 +6,9 @@ set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 
 project(rosbag2parquet)
 # remember to source the ros env for this to find the ros symbols
-find_package(rosbag_storage)
-find_package(roscpp_serialization)
-
+find_package(rosbag_storage REQUIRED)
+find_package(roscpp_serialization REQUIRED)
+find_package(ros_type_introspection REQUIRED)
 #NOTE:
 # place arrow/parquet include/lib dirs in
 # CPLUS_INCLUDE_PATH, LIBRARY_PATH, LD_LIBRARY_PATH respectively
@@ -23,7 +23,11 @@ find_package(roscpp_serialization)
                     #-fsanitize=address
                     )
 
-include_directories(${rosbag_storage_INCLUDE_DIRS} ${roscpp_serialization_INCLUDE_DIRS})
+include_directories(
+        ${rosbag_storage_INCLUDE_DIRS}
+        ${roscpp_serialization_INCLUDE_DIRS}
+        ${ros_type_introspection_INCLUDE_DIRS}
+)
 add_executable(rosbag_example.bin rosbag_example.cpp)
 
 set(rosbag_LIBRARIES
@@ -47,4 +51,5 @@ target_link_libraries(parquet_example.bin
 add_executable(rosbag2parquet.bin rosbag2parquet.cpp)
 target_link_libraries(rosbag2parquet.bin
         ${rosbag_LIBRARIES}
-        ${parquet_LIBRARIES})
+        ${parquet_LIBRARIES}
+        ${ros_type_introspection_LIBRARIES})
