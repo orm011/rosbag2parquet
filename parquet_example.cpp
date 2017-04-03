@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
     }
 
     // Write the ByteArray column. Make every alternate values NULL
-    parquet::ByteArrayWriter* ba_writer =rep
+    parquet::ByteArrayWriter* ba_writer =
         static_cast<parquet::ByteArrayWriter*>(rg_writer->NextColumn());
     for (int i = 0; i < NUM_ROWS_PER_ROW_GROUP; i++) {
       parquet::ByteArray value;

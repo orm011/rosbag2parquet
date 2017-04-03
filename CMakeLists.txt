@@ -1,9 +1,17 @@
 cmake_minimum_required(VERSION 3.5)
-project(bag_reader)
 
+#force outside build (avoid polluting folder)
+set(CMAKE_DISABLE_SOURCE_CHANGES ON)
+set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
+
+project(rosbag2parquet)
 # remember to source the ros env for this to find the ros symbols
 find_package(rosbag_storage)
 find_package(roscpp_serialization)
+
+#NOTE:
+# place arrow/parquet include/lib dirs in
+# CPLUS_INCLUDE_PATH, LIBRARY_PATH, LD_LIBRARY_PATH respectively
 
 #note: conda parquet is built with the older C++ abi, but your local ros is likely
 #built with the new one. you can build your own parquet-cpp to have new abi on both
@@ -16,22 +24,27 @@ find_package(roscpp_serialization)
                     )
 
 include_directories(${rosbag_storage_INCLUDE_DIRS} ${roscpp_serialization_INCLUDE_DIRS})
-add_executable(bag_reader.bin bag_reader.cpp)
+add_executable(rosbag_example.bin rosbag_example.cpp)
 
-target_link_libraries(bag_reader.bin
+set(rosbag_LIBRARIES
         ${rosbag_storage_LIBRARIES}
         ${roscpp_serialization_LIBRARIES})
 
-include_directories(/home/orm/parquet-cpp/build/arrow_ep/src/arrow_ep-install/include/)
-link_directories(/home/orm/parquet-cpp/build/arrow_ep/src/arrow_ep-install/lib/
-                /usr/local/lib)
+target_link_libraries(rosbag_example.bin
+        ${rosbag_LIBRARIES}
+)
 
-add_executable(reader_writer.bin reader-writer.cc)
+
+set(parquet_LIBRARIES parquet arrow arrow_io)
+add_executable(parquet_example.bin parquet_example.cpp)
 
 #if asan debugging, link to asan as well
-target_link_libraries(reader_writer.bin
-                        parquet
-                        arrow_io
-                        arrow
+target_link_libraries(parquet_example.bin
+                    ${parquet_LIBRARIES}
                         #asan
-                    )
+        )
+
+add_executable(rosbag2parquet.bin rosbag2parquet.cpp)
+target_link_libraries(rosbag2parquet.bin
+        ${rosbag_LIBRARIES}
+        ${parquet_LIBRARIES})

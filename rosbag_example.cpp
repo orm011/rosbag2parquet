@@ -4,11 +4,10 @@
 #include <string>
 #include <boost/shared_ptr.hpp>
 
-
-#include "ros/datatypes.h"
-#include "ros/time.h"
-#include "rosbag/bag.h"
-#include "rosbag/view.h"
+#include <ros/datatypes.h>
+#include <ros/time.h>
+#include <rosbag/bag.h>
+#include <rosbag/view.h>
 
 using namespace std;
 
