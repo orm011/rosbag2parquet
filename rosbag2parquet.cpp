@@ -85,7 +85,7 @@ public:
             const std::string &type,
             parquet::RowGroupWriter *rg_writer) {
         // rg_writer only used for SAVE
-        //cout << string(recursion_depth, ' ') << action_string[action] << "'ing  a " << type << endl ;
+        // cout << string(recursion_depth, ' ') << action_string[action] << "'ing  a " << type << endl ;
         const auto& rostype = types.at(type);
 
         for (auto f : rostype->fields()) {
@@ -96,7 +96,6 @@ public:
 
             // saving only byte buffers (uint8 arrays) right now.
             if (f.type().isArray()) {
-
 
                 // figure out how many things to skip
                 auto rawlen = f.type().arraySize();
@@ -115,14 +114,20 @@ public:
                     parquet::ByteArray ba(len, *buffer);
                     static_cast<parquet::ByteArrayWriter *>(writer)->WriteBatch(1, nullptr, nullptr, &ba);
                     (*buffer)+=len;
-                    return;
+                    continue;
+                }
+
+                // fixed len arrays of builtins (may save)
+                if (f.type().isBuiltin() && f.type().isArray() && f.type().arraySize() > 0) {
+                    for (int i = 0; i < f.type().arraySize(); ++i) {
+                        handleBuiltin(recursion_depth +1, action, buffer, f.type().typeID(), rg_writer);
+                    }
+                    continue;
                 }
 
 
                 // now skip them one by one
                 for (uint32_t i = 0; i < len; ++i){
-                    //cout << ' ' ;
-
                     // convert name to scalar (so it can be looked up)
                     if (f.type().isBuiltin()){
                         handleBuiltin(recursion_depth+1, SKIP_SCALAR, buffer, f.type().typeID(), nullptr);
@@ -132,10 +137,11 @@ public:
                                       scalar_name, nullptr);
                     }
                 }
+
+                continue;
             } else if (!f.type().isBuiltin()) {
-                // skip non-builtins
-                handleMessage(recursion_depth + 1, SKIP, types, buffer,
-                              f.type().baseName().toStdString(), nullptr);
+                handleMessage(recursion_depth + 1, action, types, buffer,
+                              f.type().baseName().toStdString(), rg_writer);
             } else {
                 handleBuiltin(recursion_depth + 1, action, buffer, f.type().typeID(), rg_writer);
             }
@@ -149,7 +155,7 @@ public:
                        const uint8_t** buffer_ptr,
                        const RosIntrospection::BuiltinType  elemtype,
                        parquet::RowGroupWriter* rg_writer) {
-        //cout << string(recursion_depth, ' ') << action_string[action] << "'ing a " << elemtype << endl;
+        // cout << string(recursion_depth, ' ') << action_string[action] << "'ing a " << elemtype << endl;
 
         using RosIntrospection::BuiltinType;
 
@@ -213,11 +219,14 @@ public:
                 return;
             }
             case BuiltinType::TIME: { // 2 ints (secs/nanosecs)
-                assert(action != SAVE);
-                ReadFromBuffer<int32_t>(buffer_ptr);
-                ReadFromBuffer<int32_t>(buffer_ptr);
+                auto secs = ReadFromBuffer<int32_t>(buffer_ptr);
+                auto nsecs = ReadFromBuffer<int32_t>(buffer_ptr);
 
-                assert (action != SAVE);
+                if (action == SAVE){
+                    static_cast<parquet::Int32Writer*>(writer)->WriteBatch(1, nullptr, nullptr, &secs);
+                    writer = rg_writer->NextColumn();
+                    static_cast<parquet::Int32Writer*>(writer)->WriteBatch(1, nullptr, nullptr, &nsecs);
+                }
                 return;
             }
             case BuiltinType::STRING: {
@@ -247,7 +256,7 @@ public:
                 "sensor_msgs/MagneticField",
                 "sensor_msgs/LaserScan",
                 "sensor_msgs/CompressedImage",
-                //"velodyne_msgs/VelodyneScan", // all complex
+                "velodyne_msgs/VelodyneScan", // all complex
                 "nav_msgs/Odometry",
                 "imu_3dm_gx4/FilterOutput",
                 "sensor_msgs/NavSatFix"
@@ -292,7 +301,10 @@ public:
     }
 
 private:
-    parquet::schema::NodeVector toParquetSchema(const RosIntrospection::ROSMessage& ros_msg_type)
+    parquet::schema::NodeVector toParquetSchema(
+            const std::string & name_prefix,
+            const RosIntrospection::ROSMessage& ros_msg_type,
+            const typeinfo & tp)
     {
         // TODO: I should use a table to map ros type to pair of Type, LogicalType.
         auto to_parquet_type = [](RosIntrospection::BuiltinType ros_typ){
@@ -315,8 +327,6 @@ private:
                     return Type::INT64;
                 case BuiltinType::STRING:
                     return Type::BYTE_ARRAY;
-                case BuiltinType::TIME:
-                    return Type::INT96; // is this good enough?
                 case BuiltinType::FLOAT32:
                     return Type::FLOAT;
                 case BuiltinType::FLOAT64:
@@ -331,28 +341,63 @@ private:
         for (auto &f: ros_msg_type.fields()){
             if (f.isConstant()) continue; // enum values?
             if (f.type().isArray()) {
+
                 // uint8[] is not flattened (blobs)
                 if (f.type().isBuiltin() &&
                         f.type().typeID() == RosIntrospection::BuiltinType::UINT8) {
                     parquet_fields.push_back(
                             PrimitiveNode::Make(
-                                    f.name().toStdString(), parquet::Repetition::REQUIRED,
+                                    name_prefix + f.name().toStdString(),
+                                    parquet::Repetition::REQUIRED,
                                     Type::BYTE_ARRAY, LogicalType::NONE)
                     );
                 }
+
+                // constant sized arrays of primitive types get a column for each index?
+                // TODO: make this recursive to handle fixed length arrays of any type
+                if (f.type().arraySize() > 0 && f.type().isBuiltin()){
+                    auto nm = f.name().toStdString();
+                    auto tp = to_parquet_type(f.type().typeID());
+                    for (int i = 0; i < f.type().arraySize(); ++i){
+                        parquet_fields.push_back(
+                                PrimitiveNode::Make(
+                                        name_prefix + nm + '_' + std::to_string(i),
+                                        parquet::Repetition::REQUIRED,
+                                        tp,
+                                        LogicalType::NONE)
+                        );
+                    }
+                }
+
                 continue;
             }
 
+
+            // scalars
             if (f.type().typeID() == RosIntrospection::BuiltinType::STRING ){
                 parquet_fields.push_back(PrimitiveNode::Make(
-                        f.name().toStdString(), parquet::Repetition::REQUIRED,
+                        name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
                         Type::BYTE_ARRAY, LogicalType::UTF8));
-            }  else if (f.type().isBuiltin()) { // non strings
+            }  else if (f.type().typeID() == RosIntrospection::TIME){
                 parquet_fields.push_back(PrimitiveNode::Make(
-                        f.name().toStdString(), parquet::Repetition::REQUIRED,
+                        name_prefix + f.name().toStdString() + "_sec", parquet::Repetition::REQUIRED,
+                        Type::INT32, LogicalType::NONE));
+
+                parquet_fields.push_back(PrimitiveNode::Make(
+                        name_prefix + f.name().toStdString() + "_nsec", parquet::Repetition::REQUIRED,
+                        Type::INT32, LogicalType::NONE));
+            } else if (f.type().isBuiltin()) { // non strings
+                // timestamp is a special case of a composite built in
+                parquet_fields.push_back(PrimitiveNode::Make(
+                        name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
                         to_parquet_type(f.type().typeID()), LogicalType::NONE));
             } else {
                 // TODO(orm) handle nested complex types
+                const auto & msg = tp.type_map.at(f.type().baseName().toStdString());
+                auto sub_fields = toParquetSchema(name_prefix + f.name().toStdString() + '_', *msg, tp);
+                for (auto & f : sub_fields) {
+                    parquet_fields.push_back(f);
+                }
             }
         }
 
@@ -377,7 +422,7 @@ private:
             typeinfo.ros_message = typeinfo.type_map[msg.getDataType()];
 
             // Setup the parquet schema
-            auto tmp = toParquetSchema(*typeinfo.ros_message);
+            auto tmp = toParquetSchema("", *typeinfo.ros_message, typeinfo);
             typeinfo.parquet_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
                     parquet::schema::GroupNode::Make(msg.getDataType(),
                                     parquet::Repetition::REQUIRED,
