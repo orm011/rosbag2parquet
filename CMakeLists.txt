@@ -19,7 +19,9 @@ find_package(ros_type_introspection REQUIRED)
 # in the latter case, you will need to also build this project with the old abi
     add_compile_options(-std=c++1y
                     -Wall -Werror
-                    -O1 -g -fno-omit-frame-pointer
+                    -fno-omit-frame-pointer -g
+                    #-O2
+                    -O0 -ggdb
                     #-fsanitize=address
                     )
 
