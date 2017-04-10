@@ -168,6 +168,8 @@ public:
         switch (elemtype) {
             case BuiltinType::INT8:
             case BuiltinType::UINT8:
+            case BuiltinType::BYTE:
+            case BuiltinType::BOOL:
             {
                 // parquet has no single byte type. promoting to int.
                 // (can add varint for later)
@@ -190,7 +192,9 @@ public:
                 }
                 return;
             }
-            case BuiltinType::UINT32: {
+            case BuiltinType::UINT32:
+            case BuiltinType::INT32:
+            {
                 auto tmp = ReadFromBuffer<int32_t>(buffer_ptr);
                 if (action == SAVE) {
                     static_cast<parquet::Int32Writer *>(writer)->WriteBatch(1, nullptr, nullptr, &tmp);
@@ -211,7 +215,9 @@ public:
                 }
                 return;
             }
-            case BuiltinType::INT64: {
+            case BuiltinType::INT64:
+            case BuiltinType::UINT64:
+            {
                 auto tmp = ReadFromBuffer<int64_t>(buffer_ptr);
                 if (action == SAVE) {
                     static_cast<parquet::Int64Writer *>(writer)->WriteBatch(1, nullptr, nullptr, &tmp);
@@ -246,23 +252,6 @@ public:
     }
 
     void writeMsg(const rosbag::MessageInstance& msg){
-        // TODO(orm): some types will cause crashes, due to mods to the code, so for now we
-        // whitelist them here
-        // TODO(orm): variable length arrays are being skipped right now
-        // with an iterator interface, we could just create a new table that references the original record entry
-        // eg for velodyne packets, or laser scans
-        unordered_set<std::string> types_wanted = {
-                //"sensor_msgs/Imu", // all complex
-                "sensor_msgs/MagneticField",
-                "sensor_msgs/LaserScan",
-                "sensor_msgs/CompressedImage",
-                "velodyne_msgs/VelodyneScan", // all complex
-                "nav_msgs/Odometry",
-                "imu_3dm_gx4/FilterOutput",
-                "sensor_msgs/NavSatFix"
-        };
-
-        if (types_wanted.count(msg.getDataType())) {
             std::vector<uint8_t> buffer(msg.size());
             ros::serialization::OStream stream(buffer.data(), buffer.size());
             msg.write(stream);
@@ -287,7 +276,6 @@ public:
                           typeinfo.rg_writer);
             typeinfo.rows_since_last_reset +=1;
             typeinfo.total_rows += 1;
-        }
     }
 
     void Close() {
