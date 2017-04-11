@@ -37,7 +37,7 @@ class FlattenedRosWriter {
     struct typeinfo {
         std::string filename;
         RosIntrospection::ROSTypeList type_list;
-        std::string rostypename;
+        std::string clean_tp;
         type_table_t type_map;
         const RosIntrospection::ROSMessage* ros_message;
         std::shared_ptr<parquet::schema::GroupNode> parquet_schema;
@@ -51,10 +51,9 @@ class FlattenedRosWriter {
     };
 
 
-const char* GetVerticaType(parquet::Type::type tp,
-                           parquet::LogicalType::type lt)
+const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
 {
-    switch(tp) {
+    switch(nd->physical_type()) {
         case parquet::Type::INT32:
         case parquet::Type::INT64:
             // all integer types map to INTEGER,
@@ -65,17 +64,24 @@ const char* GetVerticaType(parquet::Type::type tp,
         case parquet::Type::BOOLEAN:
             return "BOOLEAN";
         case parquet::Type::BYTE_ARRAY:
-            switch (lt){
+            switch (nd->logical_type()){
                 case parquet::LogicalType::UTF8:
                     return "VARCHAR";
                 case parquet::LogicalType::NONE:
                     return "VARBINARY";
                 default:
-                    cerr << "warning: unkown byte array combo: " << lt;
+                    cerr << "warning: unkown byte array combo";
+                    parquet::schema::PrintSchema(nd, cerr);
                     return "VARBINARY";
             }
+        case parquet::Type::FLOAT:
+            return "FLOAT";
+        case parquet::Type::DOUBLE:
+            return "DOUBLE PRECISION";
         default:
-            cerr << "ERROR: no vertica type found for this parquet type" << tp << endl;
+            cerr << "ERROR: no vertica type found for this parquet type"  << endl;
+            parquet::schema::PrintSchema(nd, cerr);
+            cerr.flush();
             assert(false);
     }
 }
@@ -91,7 +97,7 @@ public:
     }
 
     FlattenedRosWriter(const string& dirname) :
-            m_dirname(dirname), m_createfile(dirname + "/vertica_load_tables.sql")
+            m_dirname(dirname), m_loadscript(dirname + "/vertica_load_tables.sql")
     {}
 
     enum Action {
@@ -417,13 +423,43 @@ private:
         return parquet_fields;
     }
 
+    void EmitCreateStatement(const typeinfo &typeinfo) {
+        m_loadscript << "CREATE TABLE IF NOT EXISTS " << typeinfo.clean_tp << " (" << endl;
+
+        for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
+            auto &fld = typeinfo.parquet_schema->field(i);
+            m_loadscript << "  ";
+
+            if (i > 0) {
+                m_loadscript << ", ";
+            }
+            m_loadscript << fld->name() << " ";
+            assert(fld->is_primitive());
+            assert(!fld->is_repeated());
+            m_loadscript << GetVerticaType(
+                    static_cast<parquet::schema::PrimitiveNode*>(fld.get())) << endl;
+        }
+        m_loadscript << ");" << endl << endl;
+
+        // emit client statement to set a variable
+        // allows us to run with -v path=PATH
+        m_loadscript << "\\set abs_path '\\'':path:'/";
+        m_loadscript << boost::filesystem::path(typeinfo.filename).filename().native();
+        m_loadscript << "\\''" << endl;
+
+        m_loadscript << "COPY " << typeinfo.clean_tp <<
+                     " FROM :abs_path PARQUET;" << endl << endl;
+    }
+
     // inits info if not yet.
     typeinfo& getInfo(const rosbag::MessageInstance &msg) {
-        // Create a ParquetFileWriter instance once
-        auto clean_tp = regex_replace(msg.getDataType(), regex("/"), "_");
-        auto & typeinfo = m_pertype[clean_tp];
+        auto & typeinfo = m_pertype[msg.getDataType()];
 
+        // use parquet_schema as a proxy for ovrall initialization
         if (!typeinfo.parquet_schema) {
+            // Create a ParquetFileWriter instance once
+
+            typeinfo.clean_tp = move(regex_replace(msg.getDataType(), regex("/"), "_"));
             typeinfo.type_list = RosIntrospection::buildROSTypeMapFromDefinition(
                     msg.getDataType(),
                     msg.getMessageDefinition());
@@ -441,15 +477,6 @@ private:
                                     parquet::Repetition::REQUIRED,
                                     tmp));
 
-            cout << "CREATE TABLE " << clean_tp << "(" << endl;
-            for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
-                auto &fld = typeinfo.parquet_schema->field(i);
-                cout << "  " << fld->name();
-                assert(fld->is_primitive());
-                auto fldptr = static_cast<parquet::schema::PrimitiveNode*>(fld.get());
-                cout << GetVerticaType(fldptr->physical_type(), fldptr->logical_type()) << "," << endl;
-            }
-            cout << ");";
 
             cerr << "******* found type " << msg.getDataType() << endl;
             cerr << "******* ROS msg definition: " << msg.getDataType() << endl;
@@ -472,12 +499,11 @@ private:
             }
 
             // file
-            typeinfo.filename = m_dirname + "/" + clean_tp + ".parquet";
+            typeinfo.filename = m_dirname + "/" + typeinfo.clean_tp + ".parquet";
             // Create a local file output stream instance.
             using FileClass = ::arrow::io::FileOutputStream;
             auto dnme = msg.getDataType();
             PARQUET_THROW_NOT_OK(FileClass::Open(typeinfo.filename, &typeinfo.out_file));
-
 
             // Add writer properties
             parquet::WriterProperties::Builder builder;
@@ -489,13 +515,16 @@ private:
             //    Append a RowGroup with a specific number of rows.
             typeinfo.rg_writer = typeinfo.file_writer->AppendRowGroup(NUM_ROWS_PER_ROW_GROUP);
             //assert(typeinfo.parquet_schema.size() == typeinfo.ros_message->fields().size());
+
+            // emit create statement to load data easily
+            EmitCreateStatement(typeinfo);
         }
 
         return typeinfo;
     }
 
     const string m_dirname;
-    ofstream m_createfile;
+    ofstream m_loadscript;
     std::unordered_map<std::string, typeinfo> m_pertype;
 };
 
@@ -511,18 +540,22 @@ int main(int argc, char **argv)
     auto filename = dir.filename();
     filename.replace_extension().concat("_parquet_dir");
     dir.remove_leaf() /= filename;
+    int i = 0;
 
-    cerr << "writing to directory " << dir.native() << endl;
-    int64_t count = 0;
+    while (boost::filesystem::exists(dir)){
+        ++i;
+        dir.replace_extension(to_string(i));
+    }
 
     if(boost::filesystem::create_directory(dir))
     {
-        cerr<< "Directory Created: " << dir.native() << endl;
+        cerr<< "creating output directory " << dir.native() << endl;
     } else {
         cerr << "ERROR: Failed to create output directory." << endl;
         exit(1);
     }
 
+    int64_t count = 0;
     FlattenedRosWriter outputs(dir.native());
     for (const auto & msg : view) {
         outputs.writeMsg(msg);
