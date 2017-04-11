@@ -81,13 +81,18 @@ const char* GetVerticaType(parquet::Type::type tp,
 }
 
 public:
-    FlattenedRosWriter(const string& dirname) : m_dirname(dirname) {
-        boost::filesystem::path dir(dirname);
-        if(boost::filesystem::create_directory(dir))
-        {
-            std::cerr<< "Directory Created: "<< m_dirname <<std::endl;
-        }
+
+
+    template <typename T> T ReadFromBuffer(const uint8_t** buffer)
+    {
+        T destination = (*(reinterpret_cast<const T *>( *buffer )));
+        *buffer += sizeof(T);
+        return destination;
     }
+
+    FlattenedRosWriter(const string& dirname) :
+            m_dirname(dirname), m_createfile(dirname + "/vertica_load_tables.sql")
+    {}
 
     enum Action {
         SKIP, // used for now, to be able to load the parts of data we can parse
@@ -415,7 +420,7 @@ private:
     // inits info if not yet.
     typeinfo& getInfo(const rosbag::MessageInstance &msg) {
         // Create a ParquetFileWriter instance once
-        auto clean_tp = regex_replace(msg.getDataType(), regex("/"), "__");
+        auto clean_tp = regex_replace(msg.getDataType(), regex("/"), "_");
         auto & typeinfo = m_pertype[clean_tp];
 
         if (!typeinfo.parquet_schema) {
@@ -435,6 +440,16 @@ private:
                     parquet::schema::GroupNode::Make(msg.getDataType(),
                                     parquet::Repetition::REQUIRED,
                                     tmp));
+
+            cout << "CREATE TABLE " << clean_tp << "(" << endl;
+            for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
+                auto &fld = typeinfo.parquet_schema->field(i);
+                cout << "  " << fld->name();
+                assert(fld->is_primitive());
+                auto fldptr = static_cast<parquet::schema::PrimitiveNode*>(fld.get());
+                cout << GetVerticaType(fldptr->physical_type(), fldptr->logical_type()) << "," << endl;
+            }
+            cout << ");";
 
             cerr << "******* found type " << msg.getDataType() << endl;
             cerr << "******* ROS msg definition: " << msg.getDataType() << endl;
@@ -473,7 +488,6 @@ private:
                     parquet::ParquetFileWriter::Open(typeinfo.out_file, typeinfo.parquet_schema, props);
             //    Append a RowGroup with a specific number of rows.
             typeinfo.rg_writer = typeinfo.file_writer->AppendRowGroup(NUM_ROWS_PER_ROW_GROUP);
-
             //assert(typeinfo.parquet_schema.size() == typeinfo.ros_message->fields().size());
         }
 
@@ -481,6 +495,7 @@ private:
     }
 
     const string m_dirname;
+    ofstream m_createfile;
     std::unordered_map<std::string, typeinfo> m_pertype;
 };
 
@@ -492,13 +507,28 @@ int main(int argc, char **argv)
     rosbag::View view;
     view.addQuery(bag);
 
-    const std::string PARQUET_DIRNAME = ROSBAG_FILENAME + "_parquet";
-    cerr << "writing to directory " << PARQUET_DIRNAME << endl;
+    boost::filesystem::path dir(ROSBAG_FILENAME);
+    auto filename = dir.filename();
+    filename.replace_extension().concat("_parquet_dir");
+    dir.remove_leaf() /= filename;
+
+    cerr << "writing to directory " << dir.native() << endl;
     int64_t count = 0;
-    FlattenedRosWriter outputs(PARQUET_DIRNAME);
+
+    if(boost::filesystem::create_directory(dir))
+    {
+        cerr<< "Directory Created: " << dir.native() << endl;
+    } else {
+        cerr << "ERROR: Failed to create output directory." << endl;
+        exit(1);
+    }
+
+    FlattenedRosWriter outputs(dir.native());
     for (const auto & msg : view) {
         outputs.writeMsg(msg);
         count+= 1;
+        // TODO: remove. only doing small tests right now
+        if (count == 4000) break;
     }
 
     outputs.Close();
