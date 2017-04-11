@@ -42,7 +42,7 @@ target_link_libraries(rosbag_example.bin
 
 
 set(parquet_LIBRARIES parquet arrow arrow_io)
-add_executable(parquet_example.bin parquet_example.cpp)
+add_executable(parquet_example.bin parquet_example.cpp types.h)
 
 #if asan debugging, link to asan as well
 target_link_libraries(parquet_example.bin

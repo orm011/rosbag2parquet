@@ -9,7 +9,6 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
 
-#include <ros/datatypes.h>
 #include <ros/time.h>
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
@@ -19,14 +18,13 @@
 #include <parquet/api/writer.h>
 #include <parquet/api/schema.h>
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#include <ros_type_introspection/deserializer.hpp>
-#pragma GCC diagnostic pop
+#include "types.h"
 
 using namespace std;
-constexpr int NUM_ROWS_PER_ROW_GROUP = 1; // TODO make large number (need to implement row -> col batching for this)
-
+constexpr int NUM_ROWS_PER_ROW_GROUP = 1;
+// TODO make large number (need to implement row -> col batching for this)
+constexpr size_t kBufferSize = 1<<26;
+// 64MB;
 using parquet::Type;
 using parquet::LogicalType;
 using parquet::schema::PrimitiveNode;
@@ -39,28 +37,50 @@ class FlattenedRosWriter {
     struct typeinfo {
         std::string filename;
         RosIntrospection::ROSTypeList type_list;
+        std::string rostypename;
         type_table_t type_map;
         const RosIntrospection::ROSMessage* ros_message;
         std::shared_ptr<parquet::schema::GroupNode> parquet_schema;
         std::shared_ptr<::arrow::io::FileOutputStream> out_file;
         std::shared_ptr<parquet::ParquetFileWriter> file_writer;
-        parquet::RowGroupWriter* rg_writer;
+        parquet::RowGroupWriter *rg_writer;
         int total_rows = 0;
         int rows_since_last_reset = 0;
-        // TODO: want to have one vector per column to buffer stuff?
+        vector<vector<uint8_t>> columns;
+        vector<vector<size_t>> sizes;  // for variable size stuff...
     };
 
-    // TODO: explicit endianness, alignment?
-    template <typename T> T ReadFromBuffer(const uint8_t** buffer)
-    {
-        T destination =  (*( reinterpret_cast<const T*>( *buffer ) ) );
-        *buffer +=  sizeof(T);
-        return destination;
+
+const char* GetVerticaType(parquet::Type::type tp,
+                           parquet::LogicalType::type lt)
+{
+    switch(tp) {
+        case parquet::Type::INT32:
+        case parquet::Type::INT64:
+            // all integer types map to INTEGER,
+            // a vertica signed 64 bit integer (with no -2^63+1)
+            // if your data has UINT64 in the large range,
+            // Also, -2^63+1 is not going to be be handled correctly.
+            return "INTEGER";
+        case parquet::Type::BOOLEAN:
+            return "BOOLEAN";
+        case parquet::Type::BYTE_ARRAY:
+            switch (lt){
+                case parquet::LogicalType::UTF8:
+                    return "VARCHAR";
+                case parquet::LogicalType::NONE:
+                    return "VARBINARY";
+                default:
+                    cerr << "warning: unkown byte array combo: " << lt;
+                    return "VARBINARY";
+            }
+        default:
+            cerr << "ERROR: no vertica type found for this parquet type" << tp << endl;
+            assert(false);
     }
+}
 
 public:
-
-
     FlattenedRosWriter(const string& dirname) : m_dirname(dirname) {
         boost::filesystem::path dir(dirname);
         if(boost::filesystem::create_directory(dir))
