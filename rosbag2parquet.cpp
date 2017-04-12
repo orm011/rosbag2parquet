@@ -4,6 +4,8 @@
 #include <string>
 #include <memory>
 #include <regex>
+#include <utility>
+
 
 #include <boost/shared_ptr.hpp>
 #include <boost/algorithm/string.hpp>
@@ -37,17 +39,112 @@ class FlattenedRosWriter {
     struct typeinfo {
         std::string filename;
         RosIntrospection::ROSTypeList type_list;
+        std::string rostypename;
         std::string clean_tp;
         type_table_t type_map;
         const RosIntrospection::ROSMessage* ros_message;
         std::shared_ptr<parquet::schema::GroupNode> parquet_schema;
-        std::shared_ptr<::arrow::io::FileOutputStream> out_file;
+        std::shared_ptr<arrow::io::FileOutputStream> out_file;
         std::shared_ptr<parquet::ParquetFileWriter> file_writer;
-        parquet::RowGroupWriter *rg_writer;
         int total_rows = 0;
         int rows_since_last_reset = 0;
-        vector<vector<uint8_t>> columns;
-        vector<vector<size_t>> sizes;  // for variable size stuff...
+        vector<pair<
+                vector<char>,
+                vector<char> // for variable length types
+        >> columns;
+
+        void FlushBuffers(){
+            auto batch_size = rows_since_last_reset;
+            if (batch_size == 0){
+                return;
+            }
+
+            assert(columns.size() == (uint32_t)parquet_schema->field_count());
+
+            auto * rg_writer = file_writer->AppendRowGroup(batch_size);
+            // flush buffered data to each writer
+            for (int i = 0; i < (int64_t)columns.size(); ++i) {
+                using namespace parquet;
+
+                auto pn = static_cast<const PrimitiveNode*>(parquet_schema->field(i).get());
+                auto & data = columns.at(i);
+
+                auto col_writer = rg_writer->NextColumn();
+                switch(pn->physical_type()) {
+                    case Type::INT32:{
+                        using WriterT = TypedColumnWriter<DataType<Type::INT32>>;
+                        auto data_ptr = reinterpret_cast<const WriterT::T*>(data.first.data());
+                        reinterpret_cast<WriterT*>(col_writer)->WriteBatch(
+                                batch_size, nullptr, nullptr, data_ptr);
+                        break;
+                    }
+                    case Type::INT64:{
+                        using WriterT = TypedColumnWriter<DataType<Type::INT64>>;
+                        auto data_ptr = reinterpret_cast<const WriterT::T*>(data.first.data());
+                        reinterpret_cast<WriterT*>(col_writer)->WriteBatch(batch_size, nullptr, nullptr, data_ptr);
+                        break;
+                    }
+                    case Type::FLOAT:{
+                        using WriterT = TypedColumnWriter<DataType<Type::FLOAT>>;
+                        auto data_ptr = reinterpret_cast<const WriterT::T*>(data.first.data());
+                        reinterpret_cast<WriterT*>(col_writer)->WriteBatch(batch_size, nullptr, nullptr, data_ptr);
+                        break;
+                    }
+                    case Type::DOUBLE: {
+                        using WriterT = TypedColumnWriter<DataType<Type::DOUBLE>>;
+                        auto data_ptr = reinterpret_cast<const WriterT::T*>(data.first.data());
+                        reinterpret_cast<WriterT*>(col_writer)->WriteBatch(batch_size, nullptr, nullptr, data_ptr);
+                        break;
+                    }
+                    case Type::BYTE_ARRAY: {
+                        using WriterT = TypedColumnWriter<DataType<Type::BYTE_ARRAY>>;
+                        auto num_entries = data.first.size()/sizeof(uint32_t);
+                        vector<parquet::ByteArray> bas(num_entries);
+
+                        // we have the lengths on the first vector (each size 4 bytes)
+                        // then the bytes on the second.
+                        // we need to translate this to a {len, ptr} structure.
+                        // the len is read off the first vector
+                        // the ptr is the offset in the second
+                        uint32_t offset_first = 0;
+                        uint32_t offset_second = 0;
+                        for (int j = 0; j < (int64_t)num_entries; ++j){
+                            assert(offset_first <= data.first.size());
+                            auto len = *reinterpret_cast<uint32_t*>(data.first.data() + offset_first);
+                            assert(offset_second + len <= data.second.size());
+
+                            auto ptr = data.second.data() + offset_second;
+                            bas.push_back(parquet::ByteArray(len, reinterpret_cast<const uint8_t*>(ptr)));
+
+                            offset_first += sizeof(uint32_t);
+                            offset_second += len;
+                        }
+
+                        // must've read everything out
+                        assert(offset_first == data.first.size());
+                        assert(offset_second == data.second.size());
+
+                        reinterpret_cast<WriterT*>(col_writer)->WriteBatch(batch_size, nullptr, nullptr, bas.data());
+                        break;
+                    }
+                    case Type::BOOLEAN: {
+                        using WriterT = TypedColumnWriter<DataType<Type::BOOLEAN>>;
+                        auto data_ptr = reinterpret_cast<const WriterT::T*>(data.first.data());
+                        reinterpret_cast<WriterT*>(col_writer)->WriteBatch(batch_size, nullptr, nullptr, data_ptr);
+                        break;
+                    }
+                    default:
+                        assert(false && "not expecting this type after ros conversion");
+                }
+                col_writer->Close();
+                data.first.clear();
+                data.second.clear();
+            }
+
+            // update auxiliary classes
+            rows_since_last_reset = 0;
+            rg_writer->Close();
+        }
     };
 
 
@@ -108,16 +205,41 @@ public:
 
     const char* action_string[SAVE+1] = {"SKIP", "SKIP_SCALAR", "SAVE"};
 
+
+    void addRow(const uint8_t *buffer_start,
+                const uint8_t *buffer_end,
+                typeinfo &typeinfo)
+    {
+        // push raw bytes onto column buffers
+        int pos = 0;
+        auto buffer = &buffer_start;
+        handleMessage(typeinfo, &pos, 0, SAVE, buffer, "", typeinfo.rostypename);
+        // all fields saved
+        assert(pos == typeinfo.parquet_schema->field_count());
+        // all bytes seen
+        assert(*buffer == buffer_end);
+
+        // update counts
+        typeinfo.rows_since_last_reset +=1;
+        typeinfo.total_rows += 1;
+
+        // check for batch size
+        if (typeinfo.rows_since_last_reset == NUM_ROWS_PER_ROW_GROUP){
+            typeinfo.FlushBuffers();
+        }
+    }
+
     void handleMessage(
+            typeinfo & typeinfo,
+            int* flat_pos,
             int recursion_depth,
             Action action,
-            const type_table_t &types,
             const uint8_t **buffer,
-            const std::string &type,
-            parquet::RowGroupWriter *rg_writer) {
-        // rg_writer only used for SAVE
-        // cout << string(recursion_depth, ' ') << action_string[action] << "'ing  a " << type << endl ;
-        const auto& rostype = types.at(type);
+            const std::string &fieldname,
+            const std::string &type) {
+//        cout << string(recursion_depth, ' ') << action_string[action]
+//             << "ing " << fieldname << ":" << type << endl ;
+        const auto& rostype = typeinfo.type_map.at(type);
 
         for (auto f : rostype->fields()) {
             //cout << string(recursion_depth, ' ') << "field  " << f.name()
@@ -127,7 +249,6 @@ public:
 
             // saving only byte buffers (uint8 arrays) right now.
             if (f.type().isArray()) {
-
                 // figure out how many things to skip
                 auto rawlen = f.type().arraySize();
                 uint32_t len = 0;
@@ -137,13 +258,8 @@ public:
                     len = ReadFromBuffer<uint32_t>(buffer);
                 }
 
-                // TODO: deal with constant size byte arrays as a base case
+                // TODO: save byte arrays as strings
                 if (f.type().typeID() == RosIntrospection::BuiltinType::UINT8 && action == SAVE) {
-                    parquet::ColumnWriter* writer {};
-                    writer = rg_writer->NextColumn();
-
-                    parquet::ByteArray ba(len, *buffer);
-                    static_cast<parquet::ByteArrayWriter *>(writer)->WriteBatch(1, nullptr, nullptr, &ba);
                     (*buffer)+=len;
                     continue;
                 }
@@ -151,49 +267,53 @@ public:
                 // fixed len arrays of builtins (may save)
                 if (f.type().isBuiltin() && f.type().isArray() && f.type().arraySize() > 0) {
                     for (int i = 0; i < f.type().arraySize(); ++i) {
-                        handleBuiltin(recursion_depth +1, action, buffer, f.type().typeID(), rg_writer);
+                        handleBuiltin(typeinfo, flat_pos, recursion_depth +1, action,
+                                      buffer, f.name().toStdString(), f.type().typeID());
                     }
                     continue;
                 }
-
 
                 // now skip them one by one
                 for (uint32_t i = 0; i < len; ++i){
                     // convert name to scalar (so it can be looked up)
                     if (f.type().isBuiltin()){
-                        handleBuiltin(recursion_depth+1, SKIP_SCALAR, buffer, f.type().typeID(), nullptr);
+                        handleBuiltin(typeinfo, flat_pos, recursion_depth+1, SKIP_SCALAR, buffer,
+                                      f.name().toStdString(), f.type().typeID());
                     } else {
                         auto scalar_name = f.type().pkgName().toStdString() + '/' + f.type().msgName().toStdString();
-                        handleMessage(recursion_depth + 1, SKIP_SCALAR, types, buffer,
-                                      scalar_name, nullptr);
+                        handleMessage(typeinfo, flat_pos, recursion_depth + 1, SKIP_SCALAR, buffer,
+                                      f.name().toStdString(), scalar_name);
                     }
                 }
 
                 continue;
             } else if (!f.type().isBuiltin()) {
-                handleMessage(recursion_depth + 1, action, types, buffer,
-                              f.type().baseName().toStdString(), rg_writer);
+                handleMessage(typeinfo, flat_pos, recursion_depth + 1, action, buffer, f.name().toStdString(),
+                              f.type().baseName().toStdString());
             } else {
-                handleBuiltin(recursion_depth + 1, action, buffer, f.type().typeID(), rg_writer);
+                handleBuiltin(typeinfo, flat_pos, recursion_depth + 1, action, buffer, f.name().toStdString(),
+                              f.type().typeID());
             }
         }
-
         //cout << endl;
     }
 
-    void handleBuiltin(int recursion_depth,
+    void handleBuiltin(typeinfo& tp,
+                       int* flat_pos,
+                       int recursion_depth,
                        Action action,
                        const uint8_t** buffer_ptr,
-                       const RosIntrospection::BuiltinType  elemtype,
-                       parquet::RowGroupWriter* rg_writer) {
-        // cout << string(recursion_depth, ' ') << action_string[action] << "'ing a " << elemtype << endl;
+                       const string & field_name,
+                       const RosIntrospection::BuiltinType  elemtype) {
+//        cout << string(recursion_depth, ' ') << action_string[action] << "ing a " << field_name
+//             << ":" << elemtype << "pos " << *flat_pos << endl;
 
         using RosIntrospection::BuiltinType;
-
-        parquet::ColumnWriter* writer {};
-
-        if (action == SAVE) {
-            writer = rg_writer->NextColumn();
+        pair<vector<char>, vector<char>>* vector_out;
+        if (action == SAVE){
+            vector_out = &tp.columns[*flat_pos];
+            assert(*flat_pos < tp.parquet_schema->field_count());
+            (*flat_pos) += 1;
         }
 
         switch (elemtype) {
@@ -207,7 +327,7 @@ public:
                 auto tmp_tmp = ReadFromBuffer<int8_t>(buffer_ptr);
                 auto tmp =(int32_t) tmp_tmp;
                 if (action == SAVE) {
-                    static_cast<parquet::Int32Writer*>(writer)->WriteBatch(1, nullptr, nullptr, &tmp);
+                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
                 }
                 return;
             }
@@ -219,7 +339,7 @@ public:
                 auto tmp_tmp = ReadFromBuffer<int16_t>(buffer_ptr);
                 auto tmp =(int32_t) tmp_tmp;
                 if (action == SAVE) {
-                    static_cast<parquet::Int32Writer*>(writer)->WriteBatch(1, nullptr, nullptr, &tmp);
+                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
                 }
                 return;
             }
@@ -228,21 +348,21 @@ public:
             {
                 auto tmp = ReadFromBuffer<int32_t>(buffer_ptr);
                 if (action == SAVE) {
-                    static_cast<parquet::Int32Writer *>(writer)->WriteBatch(1, nullptr, nullptr, &tmp);
+                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
                 }
                 return;
             }
             case BuiltinType::FLOAT32: {
                 auto tmp = ReadFromBuffer<float>(buffer_ptr);
                 if (action == SAVE) {
-                    static_cast<parquet::FloatWriter *>(writer)->WriteBatch(1, nullptr, nullptr, &tmp);
+                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
                 }
                 return;
             }
             case BuiltinType::FLOAT64: {
                 auto tmp = ReadFromBuffer<double>(buffer_ptr);
                 if (action == SAVE) {
-                    static_cast<parquet::DoubleWriter *>(writer)->WriteBatch(1, nullptr, nullptr, &tmp);
+                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
                 }
                 return;
             }
@@ -251,26 +371,35 @@ public:
             {
                 auto tmp = ReadFromBuffer<int64_t>(buffer_ptr);
                 if (action == SAVE) {
-                    static_cast<parquet::Int64Writer *>(writer)->WriteBatch(1, nullptr, nullptr, &tmp);
+                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
                 }
                 return;
             }
             case BuiltinType::TIME: { // 2 ints (secs/nanosecs)
+                // handle as a composite type, call recusrsively
                 auto secs = ReadFromBuffer<int32_t>(buffer_ptr);
                 auto nsecs = ReadFromBuffer<int32_t>(buffer_ptr);
 
                 if (action == SAVE){
-                    static_cast<parquet::Int32Writer*>(writer)->WriteBatch(1, nullptr, nullptr, &secs);
-                    writer = rg_writer->NextColumn();
-                    static_cast<parquet::Int32Writer*>(writer)->WriteBatch(1, nullptr, nullptr, &nsecs);
+                    vector_out->first.insert(vector_out->first.end(), (char*)&secs, ((char*)&secs)+sizeof(secs));
+
+                    auto * vector_out2 = &tp.columns[*flat_pos];
+                    (*flat_pos) += (action == SAVE);
+                    vector_out2->first.insert(vector_out2->first.end(), (char*)&nsecs, ((char*)&nsecs)+sizeof(nsecs));
                 }
                 return;
             }
             case BuiltinType::STRING: {
                 auto len = ReadFromBuffer<uint32_t>(buffer_ptr);
+                auto begin = reinterpret_cast<char*>(&len);
                 if (action == SAVE) {
-                    parquet::ByteArray ba(len, *buffer_ptr);
-                    static_cast<parquet::ByteArrayWriter *>(writer)->WriteBatch(1, nullptr, nullptr, &ba);
+                    // for now, push lengths to first vector
+                    // and push bytes to second vector.
+                    // pinters into an vector get invalidated upon reallocation, so
+                    // we defer getting all pointers until flush time
+                    // at flush time, make an array to
+                    vector_out->first.insert(vector_out->first.end(), begin, begin + sizeof(len));
+                    vector_out->second.insert(vector_out->second.end(), *buffer_ptr, (*buffer_ptr) + len);
                 }
                 (*buffer_ptr)+=len;
                 return;
@@ -289,30 +418,17 @@ public:
             RosIntrospection::ROSType rtype(msg.getDataType());
             const uint8_t* buffer_raw = buffer.data();
             auto & typeinfo = getInfo(msg);
-            if (typeinfo.parquet_schema->field_count() == 0){
-                return;
+            if (typeinfo.parquet_schema->field_count()) { // some types are empty due to
+                // their contents not being supported yet... ignore those
+                // (eg dynamic reconfigure)
+                addRow(buffer_raw, buffer_raw + buffer.size(), typeinfo);
             }
-
-            if (typeinfo.rows_since_last_reset == NUM_ROWS_PER_ROW_GROUP){
-                typeinfo.rows_since_last_reset = 0;
-                typeinfo.rg_writer->Close();
-                typeinfo.rg_writer = typeinfo.file_writer->AppendRowGroup(NUM_ROWS_PER_ROW_GROUP);
-            }
-
-            handleMessage(0,
-                          SAVE,
-                          typeinfo.type_map,
-                          &buffer_raw,
-                          msg.getDataType(),
-                          typeinfo.rg_writer);
-            typeinfo.rows_since_last_reset +=1;
-            typeinfo.total_rows += 1;
     }
 
     void Close() {
         for (auto &kv : m_pertype) {
             if (kv.second.parquet_schema->field_count()) {
-                kv.second.rg_writer->Close();
+                kv.second.FlushBuffers();
                 kv.second.file_writer->Close();
                 kv.second.out_file->Close();
             }
@@ -364,12 +480,12 @@ private:
                 // uint8[] is not flattened (blobs)
                 if (f.type().isBuiltin() &&
                         f.type().typeID() == RosIntrospection::BuiltinType::UINT8) {
-                    parquet_fields.push_back(
-                            PrimitiveNode::Make(
-                                    name_prefix + f.name().toStdString(),
-                                    parquet::Repetition::REQUIRED,
-                                    Type::BYTE_ARRAY, LogicalType::NONE)
-                    );
+//                    parquet_fields.push_back(
+//                            PrimitiveNode::Make(
+//                                    name_prefix + f.name().toStdString(),
+//                                    parquet::Repetition::REQUIRED,
+//                                    Type::BYTE_ARRAY, LogicalType::NONE)
+//                    );
                 }
 
                 // constant sized arrays of primitive types get a column for each index?
@@ -386,6 +502,8 @@ private:
                                         LogicalType::NONE)
                         );
                     }
+                } else if (f.type().arraySize() > 0){
+                    assert(false && "not handling fixed sized arrays of complex types at the moment");
                 }
 
                 continue;
@@ -459,7 +577,8 @@ private:
         if (!typeinfo.parquet_schema) {
             // Create a ParquetFileWriter instance once
 
-            typeinfo.clean_tp = move(regex_replace(msg.getDataType(), regex("/"), "_"));
+            typeinfo.rostypename = msg.getDataType();
+            typeinfo.clean_tp = move(regex_replace(typeinfo.rostypename, regex("/"), "_"));
             typeinfo.type_list = RosIntrospection::buildROSTypeMapFromDefinition(
                     msg.getDataType(),
                     msg.getMessageDefinition());
@@ -473,7 +592,7 @@ private:
             // Setup the parquet schema
             auto tmp = toParquetSchema("", *typeinfo.ros_message, typeinfo);
             typeinfo.parquet_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
-                    parquet::schema::GroupNode::Make(msg.getDataType(),
+                    parquet::schema::GroupNode::Make(typeinfo.clean_tp,
                                     parquet::Repetition::REQUIRED,
                                     tmp));
 
@@ -513,11 +632,14 @@ private:
             typeinfo.file_writer =
                     parquet::ParquetFileWriter::Open(typeinfo.out_file, typeinfo.parquet_schema, props);
             //    Append a RowGroup with a specific number of rows.
-            typeinfo.rg_writer = typeinfo.file_writer->AppendRowGroup(NUM_ROWS_PER_ROW_GROUP);
+            //typeinfo.rg_writer = typeinfo.file_writer->AppendRowGroup(NUM_ROWS_PER_ROW_GROUP);
             //assert(typeinfo.parquet_schema.size() == typeinfo.ros_message->fields().size());
 
             // emit create statement to load data easily
             EmitCreateStatement(typeinfo);
+
+            // initialize columns vectors
+            typeinfo.columns.resize(typeinfo.parquet_schema->field_count());
         }
 
         return typeinfo;
@@ -560,8 +682,8 @@ int main(int argc, char **argv)
     for (const auto & msg : view) {
         outputs.writeMsg(msg);
         count+= 1;
-        // TODO: remove. only doing small tests right now
-        if (count == 4000) break;
+//        // TODO: remove. only doing small tests right now
+//        if (count == 4000) break;
     }
 
     outputs.Close();
