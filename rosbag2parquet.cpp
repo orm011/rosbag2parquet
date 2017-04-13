@@ -48,10 +48,12 @@ class FlattenedRosWriter {
         std::shared_ptr<parquet::ParquetFileWriter> file_writer;
         int total_rows = 0;
         int rows_since_last_reset = 0;
+
         vector<pair<
                 vector<char>,
                 vector<char> // for variable length types
         >> columns;
+
 
         void FlushBuffers(){
             auto batch_size = rows_since_last_reset;
@@ -68,7 +70,6 @@ class FlattenedRosWriter {
 
                 auto pn = static_cast<const PrimitiveNode*>(parquet_schema->field(i).get());
                 auto & data = columns.at(i);
-
                 auto col_writer = rg_writer->NextColumn();
                 switch(pn->physical_type()) {
                     case Type::INT32:{
@@ -194,8 +195,9 @@ public:
         return destination;
     }
 
-    FlattenedRosWriter(const string& dirname) :
-            m_dirname(dirname), m_loadscript(dirname + "/vertica_load_tables.sql")
+    FlattenedRosWriter(const string& bagname, const string& dirname) :
+            m_bagname(bagname), m_dirname(dirname),
+            m_loadscript(dirname + "/vertica_load_tables.sql")
     {}
 
     enum Action {
@@ -207,14 +209,20 @@ public:
     const char* action_string[SAVE+1] = {"SKIP", "SKIP_SCALAR", "SAVE"};
 
 
-    void addRow(const uint8_t *const buffer_start,
+    void addRow(const rosbag::MessageInstance& msg,
+                const uint8_t *const buffer_start,
                 const uint8_t *const buffer_end,
                 typeinfo &typeinfo)
     {
         // push raw bytes onto column buffers
         int pos = 0;
         auto buffer = buffer_start;
-        handleMessage(typeinfo, &pos, 0, SAVE, &buffer, "", typeinfo.rostypename);
+
+        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, "seqno", RosIntrospection::UINT64);
+        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, "topic", RosIntrospection::STRING);
+        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, "bagname", RosIntrospection::STRING);
+        handleMessage(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, "", typeinfo.rostypename);
+
         // all fields saved
         assert(pos == typeinfo.parquet_schema->field_count());
         // all bytes seen
@@ -236,8 +244,11 @@ public:
             int recursion_depth,
             Action action,
             const uint8_t **buffer,
+            const uint8_t *buffer_end,
             const std::string &fieldname,
             const std::string &type) {
+        assert(*buffer < buffer_end);
+
 //        cout << string(recursion_depth, ' ') << action_string[action]
 //             << "ing " << fieldname << ":" << type << endl ;
         const auto& rostype = typeinfo.type_map.at(type);
@@ -254,7 +265,7 @@ public:
                 // handle uint8 vararray just like a string
                 if (f.type().typeID() == RosIntrospection::BuiltinType::UINT8 && f.type().arraySize() < 0) {
                     handleBuiltin(typeinfo, flat_pos, recursion_depth+1, action,
-                    buffer, f.name().toStdString(), RosIntrospection::BuiltinType::STRING);
+                    buffer, buffer_end, f.name().toStdString(), RosIntrospection::BuiltinType::STRING);
                     continue;
                 }
 
@@ -273,7 +284,7 @@ public:
                 if (f.type().isBuiltin() && f.type().isArray() && f.type().arraySize() > 0) {
                     for (int i = 0; i < f.type().arraySize(); ++i) {
                         handleBuiltin(typeinfo, flat_pos, recursion_depth +1, action,
-                                      buffer, f.name().toStdString(), f.type().typeID());
+                                      buffer, buffer_end, f.name().toStdString(), f.type().typeID());
                     }
                     continue;
                 }
@@ -283,20 +294,21 @@ public:
                     // convert name to scalar (so it can be looked up)
                     if (f.type().isBuiltin()){
                         handleBuiltin(typeinfo, flat_pos, recursion_depth+1, SKIP_SCALAR, buffer,
+                                      buffer_end,
                                       f.name().toStdString(), f.type().typeID());
                     } else {
                         auto scalar_name = f.type().pkgName().toStdString() + '/' + f.type().msgName().toStdString();
-                        handleMessage(typeinfo, flat_pos, recursion_depth + 1, SKIP_SCALAR, buffer,
+                        handleMessage(typeinfo, flat_pos, recursion_depth + 1, SKIP_SCALAR, buffer, buffer_end,
                                       f.name().toStdString(), scalar_name);
                     }
                 }
 
                 continue;
             } else if (!f.type().isBuiltin()) {
-                handleMessage(typeinfo, flat_pos, recursion_depth + 1, action, buffer, f.name().toStdString(),
+                handleMessage(typeinfo, flat_pos, recursion_depth + 1, action, buffer, buffer_end, f.name().toStdString(),
                               f.type().baseName().toStdString());
             } else {
-                handleBuiltin(typeinfo, flat_pos, recursion_depth + 1, action, buffer, f.name().toStdString(),
+                handleBuiltin(typeinfo, flat_pos, recursion_depth + 1, action, buffer, buffer_end, f.name().toStdString(),
                               f.type().typeID());
             }
         }
@@ -308,8 +320,10 @@ public:
                        int recursion_depth,
                        Action action,
                        const uint8_t** buffer_ptr,
+                       const uint8_t* buffer_end,
                        const string & field_name,
                        const RosIntrospection::BuiltinType  elemtype) {
+        assert(*buffer_ptr < buffer_end);
 //        cout << string(recursion_depth, ' ') << action_string[action] << "ing a " << field_name
 //             << ":" << elemtype << "pos " << *flat_pos << endl;
 
@@ -417,17 +431,42 @@ public:
     }
 
     void writeMsg(const rosbag::MessageInstance& msg){
-            std::vector<uint8_t> buffer(msg.size());
-            ros::serialization::OStream stream(buffer.data(), buffer.size());
-            msg.write(stream);
-            RosIntrospection::ROSType rtype(msg.getDataType());
-            const uint8_t* buffer_raw = buffer.data();
-            auto & typeinfo = getInfo(msg);
-            if (typeinfo.parquet_schema->field_count()) { // some types are empty due to
-                // their contents not being supported yet... ignore those
-                // (eg dynamic reconfigure)
-                addRow(buffer_raw, buffer_raw + buffer.size(), typeinfo);
+            uint32_t topic_size = (uint32_t)msg.getTopic().size();
+            uint32_t bagname_size = (uint32_t)m_bagname.size();
+
+            auto buffer_len =
+                    sizeof(m_seqno) +
+                    sizeof(topic_size) + topic_size +
+                    sizeof(bagname_size) + bagname_size +
+                    msg.size();
+
+            m_buffer.clear();
+            m_buffer.reserve(buffer_len);
+
+            // hack: copy seq no and topic into the buffer and treat them as message entities
+            // SEQ, TOPIC, BAG
+            m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
+
+            m_buffer.insert(m_buffer.end(), (uint8_t*)&topic_size, (uint8_t*)&topic_size + sizeof(topic_size));
+            m_buffer.insert(m_buffer.end(), msg.getTopic().begin(), msg.getTopic().end());
+
+            m_buffer.insert(m_buffer.end(), (uint8_t*)&bagname_size, (uint8_t*)&bagname_size + sizeof(bagname_size));
+            m_buffer.insert(m_buffer.end(), m_bagname.begin(), m_bagname.end());
+
+            assert(m_buffer.capacity() - m_buffer.size() >= msg.size());
+            {
+                uint8_t *buffer_raw = m_buffer.data() + m_buffer.size();
+                ros::serialization::OStream stream(buffer_raw, msg.size());
+                msg.write(stream);
+                RosIntrospection::ROSType rtype(msg.getDataType());
             }
+
+            auto &typeinfo = getInfo(msg);
+            // NB: the std::vector we are using will not grow
+            // so its size will be misleading... but the accesses should be legal...
+            // fix this.
+            addRow(msg, m_buffer.data(), m_buffer.data() + m_buffer.size() + msg.size(), typeinfo);
+            m_seqno++;
     }
 
     void Close() {
@@ -441,10 +480,11 @@ public:
     }
 
 private:
-    parquet::schema::NodeVector toParquetSchema(
+    void toParquetSchema(
             const std::string & name_prefix,
             const RosIntrospection::ROSMessage& ros_msg_type,
-            const typeinfo & tp)
+            const typeinfo & tp,
+            parquet::schema::NodeVector* parquet_fields)
     {
         // TODO: I should use a table to map ros type to pair of Type, LogicalType.
         auto to_parquet_type = [](RosIntrospection::BuiltinType ros_typ){
@@ -477,7 +517,7 @@ private:
 
         };
 
-        parquet::schema::NodeVector parquet_fields;
+
         for (auto &f: ros_msg_type.fields()){
             if (f.isConstant()) continue; // enum values?
             if (f.type().isArray()) {
@@ -485,7 +525,7 @@ private:
                 // uint8[] is not flattened (blobs)
                 if (f.type().isBuiltin() &&
                         f.type().typeID() == RosIntrospection::BuiltinType::UINT8) {
-                    parquet_fields.push_back(
+                    parquet_fields->push_back(
                             PrimitiveNode::Make(
                                     name_prefix + f.name().toStdString(),
                                     parquet::Repetition::REQUIRED,
@@ -499,7 +539,7 @@ private:
                     auto nm = f.name().toStdString();
                     auto tp = to_parquet_type(f.type().typeID());
                     for (int i = 0; i < f.type().arraySize(); ++i){
-                        parquet_fields.push_back(
+                        parquet_fields->push_back(
                                 PrimitiveNode::Make(
                                         name_prefix + nm + '_' + std::to_string(i),
                                         parquet::Repetition::REQUIRED,
@@ -517,33 +557,28 @@ private:
 
             // scalars
             if (f.type().typeID() == RosIntrospection::BuiltinType::STRING ){
-                parquet_fields.push_back(PrimitiveNode::Make(
+                parquet_fields->push_back(PrimitiveNode::Make(
                         name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
                         Type::BYTE_ARRAY, LogicalType::UTF8));
             }  else if (f.type().typeID() == RosIntrospection::TIME){
-                parquet_fields.push_back(PrimitiveNode::Make(
+                parquet_fields->push_back(PrimitiveNode::Make(
                         name_prefix + f.name().toStdString() + "_sec", parquet::Repetition::REQUIRED,
                         Type::INT32, LogicalType::NONE));
 
-                parquet_fields.push_back(PrimitiveNode::Make(
+                parquet_fields->push_back(PrimitiveNode::Make(
                         name_prefix + f.name().toStdString() + "_nsec", parquet::Repetition::REQUIRED,
                         Type::INT32, LogicalType::NONE));
             } else if (f.type().isBuiltin()) { // non strings
                 // timestamp is a special case of a composite built in
-                parquet_fields.push_back(PrimitiveNode::Make(
+                parquet_fields->push_back(PrimitiveNode::Make(
                         name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
                         to_parquet_type(f.type().typeID()), LogicalType::NONE));
             } else {
                 // TODO(orm) handle nested complex types
                 const auto & msg = tp.type_map.at(f.type().baseName().toStdString());
-                auto sub_fields = toParquetSchema(name_prefix + f.name().toStdString() + '_', *msg, tp);
-                for (auto & f : sub_fields) {
-                    parquet_fields.push_back(f);
-                }
+                toParquetSchema(name_prefix + f.name().toStdString() + '_', *msg, tp, parquet_fields);
             }
         }
-
-        return parquet_fields;
     }
 
     void EmitCreateStatement(const typeinfo &typeinfo) {
@@ -595,11 +630,34 @@ private:
             typeinfo.ros_message = typeinfo.type_map[msg.getDataType()];
 
             // Setup the parquet schema
-            auto tmp = toParquetSchema("", *typeinfo.ros_message, typeinfo);
+            parquet::schema::NodeVector parquet_fields;
+
+            // always include bagfile, pos within bagfile, topic
+            parquet_fields.push_back(
+                    parquet::schema::PrimitiveNode::Make("seqno", // unique within bagfile
+                                                         parquet::Repetition::REQUIRED,
+                                                         parquet::Type::INT64,
+                                                         parquet::LogicalType::UINT_64));
+
+            parquet_fields.push_back(
+                    parquet::schema::PrimitiveNode::Make("topic",
+                                                         parquet::Repetition::REQUIRED,
+                                                         parquet::Type::BYTE_ARRAY,
+                                                         parquet::LogicalType::UTF8));
+
+            parquet_fields.push_back(
+                    parquet::schema::PrimitiveNode::Make("bagfile",
+                                                         parquet::Repetition::REQUIRED,
+                                                         parquet::Type::BYTE_ARRAY,
+                                                         parquet::LogicalType::UTF8));
+
+
+            toParquetSchema("", *typeinfo.ros_message, typeinfo, &parquet_fields);
+
             typeinfo.parquet_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
                     parquet::schema::GroupNode::Make(typeinfo.clean_tp,
                                     parquet::Repetition::REQUIRED,
-                                    tmp));
+                                    parquet_fields));
 
 
             cerr << "******* found type " << msg.getDataType() << endl;
@@ -650,6 +708,9 @@ private:
         return typeinfo;
     }
 
+    std::vector<uint8_t> m_buffer;
+    const string m_bagname;
+    uint64_t m_seqno = 0;
     const string m_dirname;
     ofstream m_loadscript;
     std::unordered_map<std::string, typeinfo> m_pertype;
@@ -683,7 +744,7 @@ int main(int argc, char **argv)
     }
 
     int64_t count = 0;
-    FlattenedRosWriter outputs(dir.native());
+    FlattenedRosWriter outputs(ROSBAG_FILENAME, dir.native());
     for (const auto & msg : view) {
         outputs.writeMsg(msg);
         count+= 1;
