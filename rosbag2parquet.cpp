@@ -150,6 +150,7 @@ class FlattenedRosWriter {
 
 const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
 {
+
     switch(nd->physical_type()) {
         case parquet::Type::INT32:
         case parquet::Type::INT64:
@@ -206,18 +207,18 @@ public:
     const char* action_string[SAVE+1] = {"SKIP", "SKIP_SCALAR", "SAVE"};
 
 
-    void addRow(const uint8_t *buffer_start,
-                const uint8_t *buffer_end,
+    void addRow(const uint8_t *const buffer_start,
+                const uint8_t *const buffer_end,
                 typeinfo &typeinfo)
     {
         // push raw bytes onto column buffers
         int pos = 0;
-        auto buffer = &buffer_start;
-        handleMessage(typeinfo, &pos, 0, SAVE, buffer, "", typeinfo.rostypename);
+        auto buffer = buffer_start;
+        handleMessage(typeinfo, &pos, 0, SAVE, &buffer, "", typeinfo.rostypename);
         // all fields saved
         assert(pos == typeinfo.parquet_schema->field_count());
         // all bytes seen
-        assert(*buffer == buffer_end);
+        assert(buffer == buffer_end);
 
         // update counts
         typeinfo.rows_since_last_reset +=1;
@@ -249,6 +250,15 @@ public:
 
             // saving only byte buffers (uint8 arrays) right now.
             if (f.type().isArray()) {
+
+                // handle uint8 vararray just like a string
+                if (f.type().typeID() == RosIntrospection::BuiltinType::UINT8 && f.type().arraySize() < 0) {
+                    handleBuiltin(typeinfo, flat_pos, recursion_depth+1, action,
+                    buffer, f.name().toStdString(), RosIntrospection::BuiltinType::STRING);
+                    continue;
+                }
+
+
                 // figure out how many things to skip
                 auto rawlen = f.type().arraySize();
                 uint32_t len = 0;
@@ -258,11 +268,6 @@ public:
                     len = ReadFromBuffer<uint32_t>(buffer);
                 }
 
-                // TODO: save byte arrays as strings
-                if (f.type().typeID() == RosIntrospection::BuiltinType::UINT8 && action == SAVE) {
-                    (*buffer)+=len;
-                    continue;
-                }
 
                 // fixed len arrays of builtins (may save)
                 if (f.type().isBuiltin() && f.type().isArray() && f.type().arraySize() > 0) {
@@ -480,12 +485,12 @@ private:
                 // uint8[] is not flattened (blobs)
                 if (f.type().isBuiltin() &&
                         f.type().typeID() == RosIntrospection::BuiltinType::UINT8) {
-//                    parquet_fields.push_back(
-//                            PrimitiveNode::Make(
-//                                    name_prefix + f.name().toStdString(),
-//                                    parquet::Repetition::REQUIRED,
-//                                    Type::BYTE_ARRAY, LogicalType::NONE)
-//                    );
+                    parquet_fields.push_back(
+                            PrimitiveNode::Make(
+                                    name_prefix + f.name().toStdString(),
+                                    parquet::Repetition::REQUIRED,
+                                    Type::BYTE_ARRAY, LogicalType::NONE)
+                    );
                 }
 
                 // constant sized arrays of primitive types get a column for each index?
