@@ -5,7 +5,7 @@
 #include <memory>
 #include <regex>
 #include <utility>
-
+#include <fstream>
 
 #include <boost/shared_ptr.hpp>
 #include <boost/algorithm/string.hpp>
@@ -23,7 +23,7 @@
 #include "types.h"
 
 using namespace std;
-constexpr int NUM_ROWS_PER_ROW_GROUP = 1;
+constexpr int NUM_ROWS_PER_ROW_GROUP = 1000;
 // TODO make large number (need to implement row -> col batching for this)
 constexpr size_t kBufferSize = 1<<26;
 // 64MB;

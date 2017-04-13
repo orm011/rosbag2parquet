@@ -20,8 +20,8 @@ find_package(ros_type_introspection REQUIRED)
     add_compile_options(-std=c++1y
                     -Wall -Werror
                     -fno-omit-frame-pointer -g
-                    #-O2
-                    -O0 -ggdb
+                    -O2
+                    #-O0 -ggdb
                     #-fsanitize=address
                     )
 
