@@ -17,12 +17,27 @@ find_package(ros_type_introspection REQUIRED)
 #built with the new one. you can build your own parquet-cpp to have new abi on both
 #or you can build your ros to have old abi on both
 # in the latter case, you will need to also build this project with the old abi
-    add_compile_options(-std=c++1y
+
+set(debug False)
+set(use_asan False)
+
+if (${debug})
+    message("using debug flags!")
+    set(debug_flags -O0 -ggdb)
+    if (use_asan)
+        message("using asan flags!")
+        set(debug_flags ${debug_flags} -fsanitize=address)
+        set(debug_libs asan)
+    endif()
+endif()
+
+    add_compile_options(
+                    -std=c++1y
                     -Wall -Werror
-                    -fno-omit-frame-pointer -g
+                    -fno-omit-frame-pointer
+                    -g
                     -O2
-                    #-O0 -ggdb
-                    #-fsanitize=address
+                    ${debug_flags}
                     )
 
 include_directories(
@@ -32,13 +47,15 @@ include_directories(
 )
 add_executable(rosbag_example.bin rosbag_example.cpp)
 
+
 set(rosbag_LIBRARIES
         ${rosbag_storage_LIBRARIES}
         ${roscpp_serialization_LIBRARIES})
 
 target_link_libraries(rosbag_example.bin
+        ${debug_libs}
         ${rosbag_LIBRARIES}
-)
+        )
 
 
 set(parquet_LIBRARIES parquet arrow arrow_io)
@@ -46,12 +63,14 @@ add_executable(parquet_example.bin parquet_example.cpp types.h)
 
 #if asan debugging, link to asan as well
 target_link_libraries(parquet_example.bin
-                    ${parquet_LIBRARIES}
-                        #asan
+        ${debug_libs}
+        ${parquet_LIBRARIES}
         )
 
 add_executable(rosbag2parquet.bin rosbag2parquet.cpp)
 target_link_libraries(rosbag2parquet.bin
+        ${debug_libs}
         ${rosbag_LIBRARIES}
         ${parquet_LIBRARIES}
-        ${ros_type_introspection_LIBRARIES})
+        ${ros_type_introspection_LIBRARIES}
+        )
