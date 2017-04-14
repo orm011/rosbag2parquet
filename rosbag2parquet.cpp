@@ -34,14 +34,11 @@ using parquet::schema::GroupNode;
 
 class FlattenedRosWriter {
 
-    using type_table_t = std::unordered_map<std::string, const RosIntrospection::ROSMessage*>;
-
     struct typeinfo {
         std::string filename;
         RosIntrospection::ROSTypeList type_list;
         std::string rostypename;
         std::string clean_tp;
-        type_table_t type_map;
         const RosIntrospection::ROSMessage* ros_message;
         std::shared_ptr<parquet::schema::GroupNode> parquet_schema;
         std::shared_ptr<arrow::io::FileOutputStream> out_file;
@@ -54,6 +51,26 @@ class FlattenedRosWriter {
                 vector<char> // for variable length types
         >> columns;
 
+        const RosIntrospection::ROSMessage* GetMessage(
+                const RosIntrospection::ROSType& tp) const {
+            // TODO(orm) handle nested complex types
+            auto basename_equals = [&] (const auto& msg) {
+                if (!tp.isArray()) {
+                    return msg.type() == tp;
+                }
+                else {
+                    // typename has [] at the end.
+                    auto cmp = memcmp(msg.type().baseName().data(), tp.baseName().data(), tp.baseName().size() - 2);
+                    return cmp == 0;
+                }
+            };
+
+            auto it = std::find_if(type_list.begin(),
+                                   type_list.end(),
+                                   basename_equals);
+            assert(it != type_list.end());
+            return &(*it);
+        }
 
         void FlushBuffers(){
             auto batch_size = rows_since_last_reset;
@@ -222,10 +239,10 @@ public:
         int pos = 0;
         auto buffer = buffer_start;
 
-        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, "seqno", RosIntrospection::UINT64);
-        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, "topic", RosIntrospection::STRING);
-        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, "bagname", RosIntrospection::STRING);
-        handleMessage(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, "", typeinfo.rostypename);
+        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::UINT64);
+        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
+        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
+        handleMessage(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, typeinfo.ros_message);
 
         // all fields saved
         assert(pos == typeinfo.parquet_schema->field_count());
@@ -249,15 +266,13 @@ public:
             Action action,
             const uint8_t **buffer,
             const uint8_t *buffer_end,
-            const std::string &fieldname,
-            const std::string &type) {
+            const RosIntrospection::ROSMessage* msgdef) {
         assert(*buffer < buffer_end);
 
 //        cout << string(recursion_depth, ' ') << action_string[action]
 //             << "ing " << fieldname << ":" << type << endl ;
-        const auto& rostype = typeinfo.type_map.at(type);
 
-        for (auto f : rostype->fields()) {
+        for (auto & f : msgdef->fields()) {
             //cout << string(recursion_depth, ' ') << "field  " << f.name()
             //     << ":" << f.type().baseName() <<  endl ;
 
@@ -269,7 +284,7 @@ public:
                 // handle uint8 vararray just like a string
                 if (f.type().typeID() == RosIntrospection::BuiltinType::UINT8 && f.type().arraySize() < 0) {
                     handleBuiltin(typeinfo, flat_pos, recursion_depth+1, action,
-                    buffer, buffer_end, f.name().toStdString(), RosIntrospection::BuiltinType::STRING);
+                    buffer, buffer_end, RosIntrospection::BuiltinType::STRING);
                     continue;
                 }
 
@@ -288,7 +303,7 @@ public:
                 if (f.type().isBuiltin() && f.type().isArray() && f.type().arraySize() > 0) {
                     for (int i = 0; i < f.type().arraySize(); ++i) {
                         handleBuiltin(typeinfo, flat_pos, recursion_depth +1, action,
-                                      buffer, buffer_end, f.name().toStdString(), f.type().typeID());
+                                      buffer, buffer_end, f.type().typeID());
                     }
                     continue;
                 }
@@ -298,21 +313,21 @@ public:
                     // convert name to scalar (so it can be looked up)
                     if (f.type().isBuiltin()){
                         handleBuiltin(typeinfo, flat_pos, recursion_depth+1, SKIP_SCALAR, buffer,
-                                      buffer_end,
-                                      f.name().toStdString(), f.type().typeID());
+                                      buffer_end,f.type().typeID());
                     } else {
-                        auto scalar_name = f.type().pkgName().toStdString() + '/' + f.type().msgName().toStdString();
+                        auto msg = typeinfo.GetMessage(f.type());
                         handleMessage(typeinfo, flat_pos, recursion_depth + 1, SKIP_SCALAR, buffer, buffer_end,
-                                      f.name().toStdString(), scalar_name);
+                                      msg);
                     }
                 }
 
                 continue;
             } else if (!f.type().isBuiltin()) {
-                handleMessage(typeinfo, flat_pos, recursion_depth + 1, action, buffer, buffer_end, f.name().toStdString(),
-                              f.type().baseName().toStdString());
+                auto msg = typeinfo.GetMessage(f.type());
+                handleMessage(typeinfo, flat_pos, recursion_depth + 1, action, buffer, buffer_end,
+                              msg);
             } else {
-                handleBuiltin(typeinfo, flat_pos, recursion_depth + 1, action, buffer, buffer_end, f.name().toStdString(),
+                handleBuiltin(typeinfo, flat_pos, recursion_depth + 1, action, buffer, buffer_end,
                               f.type().typeID());
             }
         }
@@ -325,7 +340,6 @@ public:
                        Action action,
                        const uint8_t** buffer_ptr,
                        const uint8_t* buffer_end,
-                       const string & field_name,
                        const RosIntrospection::BuiltinType  elemtype) {
         assert(*buffer_ptr < buffer_end);
 //        cout << string(recursion_depth, ' ') << action_string[action] << "ing a " << field_name
@@ -579,8 +593,7 @@ private:
                         name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
                         to_parquet_type(f.type().typeID()), LogicalType::NONE));
             } else {
-                // TODO(orm) handle nested complex types
-                const auto & msg = tp.type_map.at(f.type().baseName().toStdString());
+                auto msg = tp.GetMessage(f.type());
                 toParquetSchema(name_prefix + f.name().toStdString() + '_', *msg, tp, parquet_fields);
             }
         }
@@ -628,11 +641,7 @@ private:
                     msg.getDataType(),
                     msg.getMessageDefinition());
 
-            for (auto &tp : typeinfo.type_list) {
-                typeinfo.type_map[tp.type().baseName().toStdString()] = &tp;
-            }
-
-            typeinfo.ros_message = typeinfo.type_map[msg.getDataType()];
+            typeinfo.ros_message = &typeinfo.type_list[0];
 
             // Setup the parquet schema
             parquet::schema::NodeVector parquet_fields;
