@@ -100,7 +100,8 @@ class FlattenedRosWriter {
                     case Type::BYTE_ARRAY: {
                         using WriterT = TypedColumnWriter<DataType<Type::BYTE_ARRAY>>;
                         auto num_entries = data.first.size()/sizeof(uint32_t);
-                        vector<parquet::ByteArray> bas(num_entries);
+                        vector<parquet::ByteArray> bas;
+                        bas.reserve(num_entries);
 
                         // we have the lengths on the first vector (each size 4 bytes)
                         // then the bytes on the second.
@@ -183,6 +184,9 @@ const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
             cerr.flush();
             assert(false);
     }
+
+    assert(false);
+    return 0;
 }
 
 public:
@@ -455,17 +459,16 @@ public:
 
             assert(m_buffer.capacity() - m_buffer.size() >= msg.size());
             {
-                uint8_t *buffer_raw = m_buffer.data() + m_buffer.size();
+                auto pos = m_buffer.size();
+                m_buffer.resize(buffer_len);
+                uint8_t *buffer_raw = m_buffer.data() + pos;
                 ros::serialization::OStream stream(buffer_raw, msg.size());
                 msg.write(stream);
                 RosIntrospection::ROSType rtype(msg.getDataType());
             }
 
             auto &typeinfo = getInfo(msg);
-            // NB: the std::vector we are using will not grow
-            // so its size will be misleading... but the accesses should be legal...
-            // fix this.
-            addRow(msg, m_buffer.data(), m_buffer.data() + m_buffer.size() + msg.size(), typeinfo);
+            addRow(msg, m_buffer.data(), m_buffer.data() + m_buffer.size(), typeinfo);
             m_seqno++;
     }
 
@@ -515,6 +518,8 @@ private:
                     assert(false);
             }
 
+            assert(false); // should never get here
+            return Type::BYTE_ARRAY;
         };
 
 
@@ -696,7 +701,7 @@ private:
                     parquet::ParquetFileWriter::Open(typeinfo.out_file, typeinfo.parquet_schema, props);
             //    Append a RowGroup with a specific number of rows.
             //typeinfo.rg_writer = typeinfo.file_writer->AppendRowGroup(NUM_ROWS_PER_ROW_GROUP);
-            //assert(typeinfo.parquet_schema.size() == typeinfo.ros_message->fields().size());
+            //assert(typeinfo.parquet_schema->field_count() == typeinfo.ros_message->fields().size());
 
             // emit create statement to load data easily
             EmitCreateStatement(typeinfo);
@@ -748,8 +753,6 @@ int main(int argc, char **argv)
     for (const auto & msg : view) {
         outputs.writeMsg(msg);
         count+= 1;
-//        // TODO: remove. only doing small tests right now
-//        if (count == 4000) break;
     }
 
     outputs.Close();
