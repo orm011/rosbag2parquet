@@ -239,7 +239,7 @@ public:
         int pos = 0;
         auto buffer = buffer_start;
 
-        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::UINT64);
+        //handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::UINT64);
         handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
         handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
         handleMessage(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, typeinfo.ros_message);
@@ -453,7 +453,7 @@ public:
             uint32_t bagname_size = (uint32_t)m_bagname.size();
 
             auto buffer_len =
-                    sizeof(m_seqno) +
+//                    sizeof(m_seqno) +
                     sizeof(topic_size) + topic_size +
                     sizeof(bagname_size) + bagname_size +
                     msg.size();
@@ -463,7 +463,7 @@ public:
 
             // hack: copy seq no and topic into the buffer and treat them as message entities
             // SEQ, TOPIC, BAG
-            m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
+            //m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
 
             m_buffer.insert(m_buffer.end(), (uint8_t*)&topic_size, (uint8_t*)&topic_size + sizeof(topic_size));
             m_buffer.insert(m_buffer.end(), msg.getTopic().begin(), msg.getTopic().end());
@@ -647,11 +647,11 @@ private:
             parquet::schema::NodeVector parquet_fields;
 
             // always include bagfile, pos within bagfile, topic
-            parquet_fields.push_back(
-                    parquet::schema::PrimitiveNode::Make("seqno", // unique within bagfile
-                                                         parquet::Repetition::REQUIRED,
-                                                         parquet::Type::INT64,
-                                                         parquet::LogicalType::UINT_64));
+//            parquet_fields.push_back(
+//                    parquet::schema::PrimitiveNode::Make("seqno", // unique within bagfile
+//                                                         parquet::Repetition::REQUIRED,
+//                                                         parquet::Type::INT64,
+//                                                         parquet::LogicalType::UINT_64));
 
             parquet_fields.push_back(
                     parquet::schema::PrimitiveNode::Make("topic",
