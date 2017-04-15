@@ -5,16 +5,17 @@ set(CMAKE_DISABLE_SOURCE_CHANGES ON)
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 set(CMAKE_CXX_STANDARD 14)
 
+
 project(rosbag2parquet)
 # remember to source the ros env for this to find the ros symbols
 find_package(rosbag_storage REQUIRED)
 find_package(roscpp_serialization REQUIRED)
 find_package(ros_type_introspection REQUIRED)
-#boost file?
-find_package(gflags REQUIRED)
 
 #NOTE:
-# place arrow/parquet include/lib dirs in
+#other deps assumed installed
+#boost filesystem
+#gflags
 # CPLUS_INCLUDE_PATH, LIBRARY_PATH, LD_LIBRARY_PATH respectively
 
 #NOTE:

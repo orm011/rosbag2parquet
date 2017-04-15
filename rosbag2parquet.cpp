@@ -474,7 +474,7 @@ public:
                     sizeof(bagname_size) + bagname_size +
                     msg.size();
 
- w           m_buffer.clear();
+            m_buffer.clear();
             m_buffer.reserve(buffer_len);
 
             // hack: copy seq no and topic into the buffer and treat them as message entities
