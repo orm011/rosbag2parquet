@@ -511,6 +511,10 @@ public:
                 kv.second.out_file->Close();
             }
         }
+
+        m_loadscript << "-- these were all the tables" << endl;
+        m_loadscript << "COMMIT;" << endl;
+        m_loadscript.close();
     }
 
 private:
@@ -643,7 +647,7 @@ private:
         m_loadscript << "\\''" << endl;
 
         m_loadscript << "COPY " << typeinfo.clean_tp <<
-                     " FROM :abs_path PARQUET;" << endl << endl;
+                     " FROM :abs_path PARQUET DIRECT NO COMMIT;" << endl << endl;
     }
 
     // inits info if not yet.
