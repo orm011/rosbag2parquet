@@ -24,7 +24,8 @@
 
 #include "types.h"
 
-static bool validate_path(const char* flagname, const std::string& val){
+// TODO: deal with -Wunused warning on validator
+bool validate_path(const char* flagname, const std::string& val){
     if (val.empty()){
         printf("No path provided for --%s\n", flagname);
         return false;
@@ -34,9 +35,9 @@ static bool validate_path(const char* flagname, const std::string& val){
 }
 
 DEFINE_string(bagfile, "", "path to input bagfile");
-DEFINE_validator(bagfile, &validate_path);
+//DEFINE_validator(bagfile, &validate_path);
 DEFINE_string(outdir, "", "path to the desired output location. An output folder will be created within.");
-DEFINE_validator(outdir, &validate_path);
+//DEFINE_validator(outdir, &validate_path);
 
 using namespace std;
 constexpr int NUM_ROWS_PER_ROW_GROUP = 1000;
@@ -232,7 +233,9 @@ public:
     FlattenedRosWriter(const string& bagname, const string& dirname) :
             m_bagname(bagname), m_dirname(dirname),
             m_loadscript(dirname + "/vertica_load_tables.sql")
-    {}
+    {
+        m_loadscript << "CREATE SCHEMA IF NOT EXISTS :schema;" << endl << endl;
+    }
 
     enum Action {
         SKIP, // used for now, to be able to load the parts of data we can parse
@@ -471,7 +474,7 @@ public:
                     sizeof(bagname_size) + bagname_size +
                     msg.size();
 
-            m_buffer.clear();
+ w           m_buffer.clear();
             m_buffer.reserve(buffer_len);
 
             // hack: copy seq no and topic into the buffer and treat them as message entities
@@ -612,8 +615,10 @@ private:
         }
     }
 
+
     void EmitCreateStatement(const typeinfo &typeinfo) {
-        m_loadscript << "CREATE TABLE IF NOT EXISTS :schema." << typeinfo.clean_tp << " (" << endl;
+        m_loadscript << "CREATE TABLE IF NOT EXISTS :schema."
+                     << typeinfo.clean_tp << " (" << endl;
 
         for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
             auto &fld = typeinfo.parquet_schema->field(i);
@@ -746,6 +751,8 @@ private:
 
 int main(int argc, char **argv)
 {
+    gflags::SetUsageMessage("converts ROS bag files to a directory of parquet files. "
+                                    "There is one parquet file per type found in the bag");
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     rosbag::Bag bag(FLAGS_bagfile, rosbag::bagmode::Read);
     rosbag::View view;
