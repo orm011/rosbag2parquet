@@ -10,6 +10,8 @@ project(rosbag2parquet)
 find_package(rosbag_storage REQUIRED)
 find_package(roscpp_serialization REQUIRED)
 find_package(ros_type_introspection REQUIRED)
+#boost file?
+find_package(gflags REQUIRED)
 
 #NOTE:
 # place arrow/parquet include/lib dirs in
@@ -66,6 +68,7 @@ target_link_libraries(parquet_example.bin
 
 add_executable(rosbag2parquet.bin rosbag2parquet.cpp)
 target_link_libraries(rosbag2parquet.bin
+        gflags
         ${rosbag_LIBRARIES}
         ${parquet_LIBRARIES}
         ${ros_type_introspection_LIBRARIES}

@@ -20,13 +20,26 @@
 #include <parquet/api/writer.h>
 #include <parquet/api/schema.h>
 
+#include <gflags/gflags.h>
+
 #include "types.h"
+
+static bool validate_path(const char* flagname, const std::string& val){
+    if (val.empty()){
+        printf("No path provided for --%s\n", flagname);
+        return false;
+    }
+
+    return true;
+}
+
+DEFINE_string(bagfile, "", "path to input bagfile");
+DEFINE_validator(bagfile, &validate_path);
+DEFINE_string(outdir, "", "path to the desired output location. An output folder will be created within.");
+DEFINE_validator(outdir, &validate_path);
 
 using namespace std;
 constexpr int NUM_ROWS_PER_ROW_GROUP = 1000;
-// TODO make large number (need to implement row -> col batching for this)
-constexpr size_t kBufferSize = 1<<26;
-// 64MB;
 using parquet::Type;
 using parquet::LogicalType;
 using parquet::schema::PrimitiveNode;
@@ -187,7 +200,7 @@ const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
                 case parquet::LogicalType::NONE:
                     return "VARBINARY";
                 default:
-                    cerr << "warning: unkown byte array combo";
+                    cerr << "warning: unknown byte array combo";
                     parquet::schema::PrintSchema(nd, cerr);
                     return "VARBINARY";
             }
@@ -600,7 +613,7 @@ private:
     }
 
     void EmitCreateStatement(const typeinfo &typeinfo) {
-        m_loadscript << "CREATE TABLE IF NOT EXISTS " << typeinfo.clean_tp << " (" << endl;
+        m_loadscript << "CREATE TABLE IF NOT EXISTS :schema." << typeinfo.clean_tp << " (" << endl;
 
         for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
             auto &fld = typeinfo.parquet_schema->field(i);
@@ -733,37 +746,42 @@ private:
 
 int main(int argc, char **argv)
 {
-    const std::string ROSBAG_FILENAME = argv[1];
-    rosbag::Bag bag(ROSBAG_FILENAME, rosbag::bagmode::Read);
+    gflags::ParseCommandLineFlags(&argc, &argv, true);
+    rosbag::Bag bag(FLAGS_bagfile, rosbag::bagmode::Read);
     rosbag::View view;
     view.addQuery(bag);
 
-    boost::filesystem::path dir(ROSBAG_FILENAME);
-    auto filename = dir.filename();
-    filename.replace_extension().concat("_parquet_dir");
-    dir.remove_leaf() /= filename;
+    boost::filesystem::path opath(FLAGS_outdir);
+    boost::filesystem::path ifile(FLAGS_bagfile);
+
+    auto odir = ifile.filename();
+    odir.replace_extension().concat("_parquet_dir");
+    opath /= odir;
+
     int i = 0;
 
-    while (boost::filesystem::exists(dir)){
+    while (boost::filesystem::exists(opath)){
         ++i;
-        dir.replace_extension(to_string(i));
+        opath.replace_extension(to_string(i));
     }
 
-    if(boost::filesystem::create_directory(dir))
+    if(boost::filesystem::create_directory(opath))
     {
-        cerr<< "creating output directory " << dir.native() << endl;
+        cerr<< "creating output directory " << opath.native() << endl;
     } else {
         cerr << "ERROR: Failed to create output directory." << endl;
         exit(1);
     }
 
     int64_t count = 0;
-    FlattenedRosWriter outputs(ROSBAG_FILENAME, dir.native());
+    FlattenedRosWriter outputs(FLAGS_bagfile, opath.native());
+
     for (const auto & msg : view) {
         outputs.writeMsg(msg);
         count+= 1;
     }
 
     outputs.Close();
+    fprintf(stderr, "Wrote %ld records to \n%s", count, opath.c_str());
     //cout << count << endl;
 }
