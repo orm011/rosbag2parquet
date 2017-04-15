@@ -234,7 +234,8 @@ public:
             m_bagname(bagname), m_dirname(dirname),
             m_loadscript(dirname + "/vertica_load_tables.sql")
     {
-        m_loadscript << "CREATE SCHEMA IF NOT EXISTS :schema;" << endl << endl;
+        m_loadscript << "CREATE SCHEMA IF NOT EXISTS :schema;" << endl;
+        m_loadscript << "set search_path=:schema;" << endl << endl;
     }
 
     enum Action {
@@ -617,7 +618,7 @@ private:
 
 
     void EmitCreateStatement(const typeinfo &typeinfo) {
-        m_loadscript << "CREATE TABLE IF NOT EXISTS :schema."
+        m_loadscript << "CREATE TABLE IF NOT EXISTS "
                      << typeinfo.clean_tp << " (" << endl;
 
         for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
