@@ -236,6 +236,10 @@ public:
     {
         m_loadscript << "CREATE SCHEMA IF NOT EXISTS :schema;" << endl;
         m_loadscript << "set search_path=:schema;" << endl << endl;
+        m_loadscript << "--  need to pass -v fileseq=<file sequence> (create a sequence if needed)" << endl;
+        m_loadscript << "\\set fileseq '\\'':fileseq'\\''" << endl;
+        m_loadscript << "-- gets a unique sequence number and begins transaction" << endl;
+        m_loadscript << "SELECT nextval(:fileseq);" << endl << endl;
     }
 
     enum Action {
@@ -256,9 +260,9 @@ public:
         int pos = 0;
         auto buffer = buffer_start;
 
-        //handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::UINT64);
+        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::INT64);
         handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
-        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
+        //handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
         handleMessage(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, typeinfo.ros_message);
 
         // all fields saved
@@ -467,26 +471,26 @@ public:
 
     void writeMsg(const rosbag::MessageInstance& msg){
             uint32_t topic_size = (uint32_t)msg.getTopic().size();
-            uint32_t bagname_size = (uint32_t)m_bagname.size();
+            //uint32_t bagname_size = (uint32_t)m_bagname.size();
 
             auto buffer_len =
-//                    sizeof(m_seqno) +
+                    sizeof(m_seqno) +
                     sizeof(topic_size) + topic_size +
-                    sizeof(bagname_size) + bagname_size +
+//                    sizeof(bagname_size) + bagname_size +
                     msg.size();
 
             m_buffer.clear();
             m_buffer.reserve(buffer_len);
 
             // hack: copy seq no and topic into the buffer and treat them as message entities
-            // SEQ, TOPIC, BAG
-            //m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
+            // SEQ, TOPIC
+            m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
 
             m_buffer.insert(m_buffer.end(), (uint8_t*)&topic_size, (uint8_t*)&topic_size + sizeof(topic_size));
             m_buffer.insert(m_buffer.end(), msg.getTopic().begin(), msg.getTopic().end());
 
-            m_buffer.insert(m_buffer.end(), (uint8_t*)&bagname_size, (uint8_t*)&bagname_size + sizeof(bagname_size));
-            m_buffer.insert(m_buffer.end(), m_bagname.begin(), m_bagname.end());
+//            m_buffer.insert(m_buffer.end(), (uint8_t*)&bagname_size, (uint8_t*)&bagname_size + sizeof(bagname_size));
+//            m_buffer.insert(m_buffer.end(), m_bagname.begin(), m_bagname.end());
 
             assert(m_buffer.capacity() - m_buffer.size() >= msg.size());
             {
@@ -511,6 +515,13 @@ public:
                 kv.second.out_file->Close();
             }
         }
+
+        m_loadscript << "CREATE TABLE IF NOT EXISTS files (" << endl;
+        m_loadscript << "  file_id DEFAULT currval(:fileseq) PRIMARY KEY" << endl;
+        m_loadscript << "  , file_load_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL" << endl;
+        m_loadscript << "  , file_path VARCHAR NOT NULL" << endl;
+        m_loadscript << ");" << endl << endl;
+        m_loadscript << "INSERT INTO files (file_path) VALUES ( '" << m_bagname << "' );" << endl << endl;
 
         m_loadscript << "-- these were all the tables" << endl;
         m_loadscript << "COMMIT;" << endl;
@@ -625,13 +636,11 @@ private:
         m_loadscript << "CREATE TABLE IF NOT EXISTS "
                      << typeinfo.clean_tp << " (" << endl;
 
+        m_loadscript << "  file_id DEFAULT currval(:fileseq)" << endl;
+
         for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
             auto &fld = typeinfo.parquet_schema->field(i);
-            m_loadscript << "  ";
-
-            if (i > 0) {
-                m_loadscript << ", ";
-            }
+            m_loadscript << ", ";
             m_loadscript << fld->name() << " ";
             assert(fld->is_primitive());
             assert(!fld->is_repeated());
@@ -669,21 +678,14 @@ private:
             // Setup the parquet schema
             parquet::schema::NodeVector parquet_fields;
 
-            // always include bagfile, pos within bagfile, topic
-//            parquet_fields.push_back(
-//                    parquet::schema::PrimitiveNode::Make("seqno", // unique within bagfile
-//                                                         parquet::Repetition::REQUIRED,
-//                                                         parquet::Type::INT64,
-//                                                         parquet::LogicalType::UINT_64));
+            // seqno and topic
+            parquet_fields.push_back(
+                    parquet::schema::PrimitiveNode::Make("seqno", // unique within bagfile
+                                                         parquet::Repetition::REQUIRED,
+                                                         parquet::Type::INT64));
 
             parquet_fields.push_back(
                     parquet::schema::PrimitiveNode::Make("topic",
-                                                         parquet::Repetition::REQUIRED,
-                                                         parquet::Type::BYTE_ARRAY,
-                                                         parquet::LogicalType::UTF8));
-
-            parquet_fields.push_back(
-                    parquet::schema::PrimitiveNode::Make("bagfile",
                                                          parquet::Repetition::REQUIRED,
                                                          parquet::Type::BYTE_ARRAY,
                                                          parquet::LogicalType::UTF8));
