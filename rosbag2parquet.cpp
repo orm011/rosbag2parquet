@@ -261,7 +261,7 @@ public:
         auto buffer = buffer_start;
 
         handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::INT64);
-        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
+        //handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
         //handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
         handleMessage(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, typeinfo.ros_message);
 
@@ -470,12 +470,12 @@ public:
     }
 
     void writeMsg(const rosbag::MessageInstance& msg){
-            uint32_t topic_size = (uint32_t)msg.getTopic().size();
+//            uint32_t topic_size = (uint32_t)msg.getTopic().size();
             //uint32_t bagname_size = (uint32_t)m_bagname.size();
 
             auto buffer_len =
                     sizeof(m_seqno) +
-                    sizeof(topic_size) + topic_size +
+//                    sizeof(topic_size) + topic_size +
 //                    sizeof(bagname_size) + bagname_size +
                     msg.size();
 
@@ -486,8 +486,8 @@ public:
             // SEQ, TOPIC
             m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
 
-            m_buffer.insert(m_buffer.end(), (uint8_t*)&topic_size, (uint8_t*)&topic_size + sizeof(topic_size));
-            m_buffer.insert(m_buffer.end(), msg.getTopic().begin(), msg.getTopic().end());
+//            m_buffer.insert(m_buffer.end(), (uint8_t*)&topic_size, (uint8_t*)&topic_size + sizeof(topic_size));
+//            m_buffer.insert(m_buffer.end(), msg.getTopic().begin(), msg.getTopic().end());
 
 //            m_buffer.insert(m_buffer.end(), (uint8_t*)&bagname_size, (uint8_t*)&bagname_size + sizeof(bagname_size));
 //            m_buffer.insert(m_buffer.end(), m_bagname.begin(), m_bagname.end());
@@ -691,12 +691,11 @@ private:
                                                          parquet::Repetition::REQUIRED,
                                                          parquet::Type::INT64));
 
-            parquet_fields.push_back(
-                    parquet::schema::PrimitiveNode::Make("topic",
-                                                         parquet::Repetition::REQUIRED,
-                                                         parquet::Type::BYTE_ARRAY,
-                                                         parquet::LogicalType::UTF8));
-
+//            parquet_fields.push_back(
+//                    parquet::schema::PrimitiveNode::Make("topic",
+//                                                         parquet::Repetition::REQUIRED,
+//                                                         parquet::Type::BYTE_ARRAY,
+//                                                         parquet::LogicalType::UTF8));
 
             toParquetSchema("", *typeinfo.ros_message, typeinfo, &parquet_fields);
 

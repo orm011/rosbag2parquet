@@ -60,6 +60,7 @@
 // elem, string, bytearray, timestamp
 
 
+/*
     namespace type_table {
         template <RosIntrospection::BuiltinType RosType> struct entry;
 
@@ -90,5 +91,6 @@
 #undef ENTRY
         // strings, byte arrays and timestamps handled manually
     }
+*/
 
 #endif //ROSBAG2PARQUET_TYPES_H
