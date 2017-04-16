@@ -517,9 +517,9 @@ public:
         }
 
         m_loadscript << "CREATE TABLE IF NOT EXISTS files (" << endl;
-        m_loadscript << "  file_id DEFAULT currval(:fileseq) PRIMARY KEY" << endl;
-        m_loadscript << "  , file_load_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL" << endl;
-        m_loadscript << "  , file_path VARCHAR NOT NULL" << endl;
+        m_loadscript << "  file_id INTEGER PRIMARY KEY DEFAULT currval(:fileseq)" << endl;
+        m_loadscript << ", file_load_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP" << endl;
+        m_loadscript << ", file_path VARCHAR NOT NULL" << endl;
         m_loadscript << ");" << endl << endl;
         m_loadscript << "INSERT INTO files (file_path) VALUES ( '" << m_bagname << "' );" << endl << endl;
 
@@ -636,7 +636,7 @@ private:
         m_loadscript << "CREATE TABLE IF NOT EXISTS "
                      << typeinfo.clean_tp << " (" << endl;
 
-        m_loadscript << "  file_id DEFAULT currval(:fileseq)" << endl;
+        m_loadscript << "  file_id INTEGER NOT NULL DEFAULT currval(:fileseq)" << endl;
 
         for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
             auto &fld = typeinfo.parquet_schema->field(i);
@@ -653,10 +653,17 @@ private:
         // allows us to run with -v path=PATH
         m_loadscript << "\\set abs_path '\\'':path:'/";
         m_loadscript << boost::filesystem::path(typeinfo.filename).filename().native();
-        m_loadscript << "\\''" << endl;
+        m_loadscript << "\\''" << endl << endl;
 
-        m_loadscript << "COPY " << typeinfo.clean_tp <<
-                     " FROM :abs_path PARQUET DIRECT NO COMMIT;" << endl << endl;
+        m_loadscript << "COPY " << typeinfo.clean_tp << "(" << endl;
+        for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
+            auto &fld = typeinfo.parquet_schema->field(i);
+            if (i > 0) {
+                m_loadscript << ", ";
+            }
+            m_loadscript << fld->name() << endl;
+        }
+        m_loadscript << ") FROM :abs_path PARQUET DIRECT NO COMMIT;" << endl << endl;
     }
 
     // inits info if not yet.
