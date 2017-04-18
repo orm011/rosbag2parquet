@@ -225,6 +225,14 @@ public:
 
     template <typename T> T ReadFromBuffer(const uint8_t** buffer)
     {
+        // Ros seems to de-facto settle for little endian order for its int types.
+        // (their wiki does not seem to specify this, however, so maybe it could up to
+        // the endianness of the machine that generated the message)
+        //
+        // If our machine were big endian (x86 is), reinterpreting
+        // would be wrong.
+        //
+        static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "implement portable int read");
         T destination = (*(reinterpret_cast<const T *>( *buffer )));
         *buffer += sizeof(T);
         return destination;
