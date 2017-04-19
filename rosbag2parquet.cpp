@@ -48,12 +48,8 @@ using parquet::schema::GroupNode;
 
 class FlattenedRosWriter {
 
-    struct typeinfo {
+    struct TableBuffer {
         std::string filename;
-        RosIntrospection::ROSTypeList type_list;
-        std::string rostypename;
-        std::string clean_tp;
-        const RosIntrospection::ROSMessage* ros_message;
         std::shared_ptr<parquet::schema::GroupNode> parquet_schema;
         std::shared_ptr<arrow::io::FileOutputStream> out_file;
         std::shared_ptr<parquet::ParquetFileWriter> file_writer;
@@ -64,27 +60,6 @@ class FlattenedRosWriter {
                 vector<char>,
                 vector<char> // for variable length types
         >> columns;
-
-        const RosIntrospection::ROSMessage* GetMessage(
-                const RosIntrospection::ROSType& tp) const {
-            // TODO(orm) handle nested complex types
-            auto basename_equals = [&] (const auto& msg) {
-                if (!tp.isArray()) {
-                    return msg.type() == tp;
-                }
-                else {
-                    // typename has [] at the end.
-                    auto cmp = memcmp(msg.type().baseName().data(), tp.baseName().data(), tp.baseName().size() - 2);
-                    return cmp == 0;
-                }
-            };
-
-            auto it = std::find_if(type_list.begin(),
-                                   type_list.end(),
-                                   basename_equals);
-            assert(it != type_list.end());
-            return &(*it);
-        }
 
         void FlushBuffers(){
             auto batch_size = rows_since_last_reset;
@@ -178,6 +153,217 @@ class FlattenedRosWriter {
             rows_since_last_reset = 0;
             rg_writer->Close();
         }
+
+        void Close() {
+            FlushBuffers();
+            file_writer->Close();
+            out_file->Close();
+        }
+    };
+
+
+    struct typeinfo : public TableBuffer {
+
+        parquet::Type::type to_parquet_type(
+                RosIntrospection::BuiltinType ros_typ)
+        {
+            using parquet::Type;
+            using namespace RosIntrospection;
+            switch(ros_typ){
+                case BuiltinType::BOOL:
+                    return Type::BOOLEAN;
+                case BuiltinType::BYTE:
+                case BuiltinType::CHAR:
+                case BuiltinType::UINT8:
+                case BuiltinType::UINT16:
+                case BuiltinType::UINT32:
+                case BuiltinType::INT8:
+                case BuiltinType::INT16:
+                case BuiltinType::INT32:
+                    return Type::INT32;
+                case BuiltinType::INT64:
+                case BuiltinType::UINT64:
+                    return Type::INT64;
+                case BuiltinType::STRING:
+                    return Type::BYTE_ARRAY;
+                case BuiltinType::FLOAT32:
+                    return Type::FLOAT;
+                case BuiltinType::FLOAT64:
+                    return Type::DOUBLE;
+                default:
+                    assert(false);
+            }
+
+            assert(false); // should never get here
+            return Type::BYTE_ARRAY; // warning
+        };
+
+
+        void toParquetSchema(
+                const std::string & name_prefix,
+                const RosIntrospection::ROSMessage& ros_msg_type,
+                parquet::schema::NodeVector* parquet_fields)
+        {
+
+            for (auto &f: ros_msg_type.fields()){
+                if (f.isConstant()) continue; // enum values?
+                if (f.type().isArray()) {
+
+                    // uint8[] is not flattened (blobs)
+                    if (f.type().isBuiltin() &&
+                        f.type().typeID() == RosIntrospection::BuiltinType::UINT8) {
+                        parquet_fields->push_back(
+                                PrimitiveNode::Make(
+                                        name_prefix + f.name().toStdString(),
+                                        parquet::Repetition::REQUIRED,
+                                        Type::BYTE_ARRAY, LogicalType::NONE)
+                        );
+                    }
+
+                    // constant sized arrays of primitive types get a column for each index?
+                    // TODO: make this recursive to handle fixed length arrays of any type
+                    if (f.type().arraySize() > 0 && f.type().isBuiltin()){
+                        auto nm = f.name().toStdString();
+                        auto tp = to_parquet_type(f.type().typeID());
+                        for (int i = 0; i < f.type().arraySize(); ++i){
+                            parquet_fields->push_back(
+                                    PrimitiveNode::Make(
+                                            name_prefix + nm + '_' + std::to_string(i),
+                                            parquet::Repetition::REQUIRED,
+                                            tp,
+                                            LogicalType::NONE)
+                            );
+                        }
+                    } else if (f.type().arraySize() > 0){
+                        assert(false && "not handling fixed sized arrays of complex types at the moment");
+                    }
+
+                    continue;
+                }
+
+
+                // scalars
+                if (f.type().typeID() == RosIntrospection::BuiltinType::STRING ){
+                    parquet_fields->push_back(PrimitiveNode::Make(
+                            name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
+                            Type::BYTE_ARRAY, LogicalType::UTF8));
+                }  else if (f.type().typeID() == RosIntrospection::TIME){
+                    parquet_fields->push_back(PrimitiveNode::Make(
+                            name_prefix + f.name().toStdString() + "_sec", parquet::Repetition::REQUIRED,
+                            Type::INT32, LogicalType::NONE));
+
+                    parquet_fields->push_back(PrimitiveNode::Make(
+                            name_prefix + f.name().toStdString() + "_nsec", parquet::Repetition::REQUIRED,
+                            Type::INT32, LogicalType::NONE));
+                } else if (f.type().isBuiltin()) { // non strings
+                    // timestamp is a special case of a composite built in
+                    parquet_fields->push_back(PrimitiveNode::Make(
+                            name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
+                            to_parquet_type(f.type().typeID()), LogicalType::NONE));
+                } else {
+                    auto msg = this->GetMessage(f.type());
+                    toParquetSchema(name_prefix + f.name().toStdString() + '_', *msg, parquet_fields);
+                }
+            }
+        }
+
+        typeinfo(const string& rostypename,
+                 const string& md5sum,
+                 const string& name_prefix,
+                 const string& msgdefinition)
+        : rostypename(rostypename),
+          msgdefinition(msgdefinition),
+          md5sum(md5sum)
+        {
+            clean_tp = move(regex_replace(rostypename, regex("/"), "_"));
+            type_list = RosIntrospection::buildROSTypeMapFromDefinition(
+                    rostypename,
+                    msgdefinition);
+
+            ros_message = &type_list[0];
+
+            // Setup the parquet schema
+            parquet::schema::NodeVector parquet_fields;
+
+            // seqno and topic
+            parquet_fields.push_back(
+                    parquet::schema::PrimitiveNode::Make("seqno", // unique within bagfile
+                                                         parquet::Repetition::REQUIRED,
+                                                         parquet::Type::INT64));
+
+            toParquetSchema("", *ros_message, &parquet_fields);
+
+            parquet_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
+                    parquet::schema::GroupNode::Make(clean_tp,
+                                                     parquet::Repetition::REQUIRED,
+                                                     parquet_fields));
+
+
+            cerr << "******* found type " << this->rostypename << endl;
+            cerr << "******* ROS msg definition: " << this->rostypename << endl;
+            stringstream defn(this->msgdefinition);
+            for (string line; std::getline(defn, line);) {
+                boost::trim(line);
+                if (line.empty()) continue;
+                if (line.compare(0, 1, "#") == 0) continue;
+                if (line.compare(0, 1, "=") == 0) break; // skip derived definitions
+                if (find(line.begin(), line.end(), '=') != line.end()) continue;
+                cerr << "  " << line << endl;
+            }
+            cerr << "******* Generated parquet schema: " << endl;
+            parquet::schema::PrintSchema(parquet_schema.get(), cerr);
+            cerr << "***********************" << endl;
+
+            if (parquet_schema->field_count() == 0) {
+                cerr << "NOTE: current generated schema is empty... skipping this type" << endl;
+                assert(0);
+            }
+
+            // file
+            filename = name_prefix + clean_tp + ".parquet";
+            // Create a local file output stream instance.
+            using FileClass = ::arrow::io::FileOutputStream;
+            PARQUET_THROW_NOT_OK(FileClass::Open(filename, &out_file));
+
+            // Add writer properties
+            parquet::WriterProperties::Builder builder;
+            builder.compression(parquet::Compression::SNAPPY);
+            std::shared_ptr<parquet::WriterProperties> props = builder.build();
+
+            file_writer =
+                    parquet::ParquetFileWriter::Open(out_file, parquet_schema, props);
+
+            // initialize columns vectors
+            columns.resize(parquet_schema->field_count());
+        }
+
+        RosIntrospection::ROSTypeList type_list;
+        std::string rostypename;
+        std::string msgdefinition;
+        std::string md5sum;
+        std::string clean_tp;
+        const RosIntrospection::ROSMessage* ros_message;
+
+        const RosIntrospection::ROSMessage* GetMessage(
+                const RosIntrospection::ROSType& tp) const {
+            // TODO(orm) handle nested complex types
+            auto basename_equals = [&] (const auto& msg) {
+                if (!tp.isArray()) {
+                    return msg.type() == tp;
+                }
+                else {
+                    // typename has [] at the end.
+                    auto cmp = memcmp(msg.type().baseName().data(), tp.baseName().data(), tp.baseName().size() - 2);
+                    return cmp == 0;
+                }
+            };
+
+            auto it = std::find_if(type_list.begin(),
+                                   type_list.end(),
+                                   basename_equals);
+            assert(it != type_list.end());
+            return &(*it);
+        }
     };
 
 
@@ -219,6 +405,43 @@ const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
     assert(false);
     return 0;
 }
+
+    void EmitCreateStatement(const string &table_name, const string& filename,
+                             const parquet::schema::GroupNode & parquet_schema,
+                             ostream& out) {
+        out << "CREATE TABLE IF NOT EXISTS "
+            << table_name << " (" << endl;
+
+        out << "  file_id INTEGER NOT NULL DEFAULT currval(:fileseq)" << endl;
+
+        for (int i = 0; i < parquet_schema.field_count(); ++i){
+            auto &fld = parquet_schema.field(i);
+            out << ", ";
+            out << fld->name() << " ";
+            assert(fld->is_primitive());
+            assert(!fld->is_repeated());
+            out << GetVerticaType(
+                    static_cast<parquet::schema::PrimitiveNode*>(fld.get())) << endl;
+        }
+        out << ");" << endl << endl;
+
+        // emit client statement to set a variable
+        // allows us to run with -v path=PATH
+        out << "\\set abs_path '\\'':path:'/";
+        out << boost::filesystem::path(filename).filename().native();
+        out << "\\''" << endl << endl;
+
+        out << "COPY " << table_name << "(" << endl;
+        for (int i = 0; i < parquet_schema.field_count(); ++i){
+            auto &fld = parquet_schema.field(i);
+            if (i > 0) {
+                out << ", ";
+            }
+            out << fld->name() << endl;
+        }
+        out << ") FROM :abs_path PARQUET DIRECT NO COMMIT;" << endl << endl;
+    }
+
 
 public:
 
@@ -518,9 +741,7 @@ public:
     void Close() {
         for (auto &kv : m_pertype) {
             if (kv.second.parquet_schema->field_count()) {
-                kv.second.FlushBuffers();
-                kv.second.file_writer->Close();
-                kv.second.out_file->Close();
+                kv.second.Close();
             }
         }
 
@@ -537,228 +758,27 @@ public:
     }
 
 private:
-    void toParquetSchema(
-            const std::string & name_prefix,
-            const RosIntrospection::ROSMessage& ros_msg_type,
-            const typeinfo & tp,
-            parquet::schema::NodeVector* parquet_fields)
-    {
-        // TODO: I should use a table to map ros type to pair of Type, LogicalType.
-        auto to_parquet_type = [](RosIntrospection::BuiltinType ros_typ){
-            using parquet::Type;
-            using namespace RosIntrospection;
-            switch(ros_typ){
-                case BuiltinType::BOOL:
-                    return Type::BOOLEAN;
-                case BuiltinType::BYTE:
-                case BuiltinType::CHAR:
-                case BuiltinType::UINT8:
-                case BuiltinType::UINT16:
-                case BuiltinType::UINT32:
-                case BuiltinType::INT8:
-                case BuiltinType::INT16:
-                case BuiltinType::INT32:
-                    return Type::INT32;
-                case BuiltinType::INT64:
-                case BuiltinType::UINT64:
-                    return Type::INT64;
-                case BuiltinType::STRING:
-                    return Type::BYTE_ARRAY;
-                case BuiltinType::FLOAT32:
-                    return Type::FLOAT;
-                case BuiltinType::FLOAT64:
-                    return Type::DOUBLE;
-                default:
-                    assert(false);
-            }
-
-            assert(false); // should never get here
-            return Type::BYTE_ARRAY;
-        };
 
 
-        for (auto &f: ros_msg_type.fields()){
-            if (f.isConstant()) continue; // enum values?
-            if (f.type().isArray()) {
-
-                // uint8[] is not flattened (blobs)
-                if (f.type().isBuiltin() &&
-                        f.type().typeID() == RosIntrospection::BuiltinType::UINT8) {
-                    parquet_fields->push_back(
-                            PrimitiveNode::Make(
-                                    name_prefix + f.name().toStdString(),
-                                    parquet::Repetition::REQUIRED,
-                                    Type::BYTE_ARRAY, LogicalType::NONE)
-                    );
-                }
-
-                // constant sized arrays of primitive types get a column for each index?
-                // TODO: make this recursive to handle fixed length arrays of any type
-                if (f.type().arraySize() > 0 && f.type().isBuiltin()){
-                    auto nm = f.name().toStdString();
-                    auto tp = to_parquet_type(f.type().typeID());
-                    for (int i = 0; i < f.type().arraySize(); ++i){
-                        parquet_fields->push_back(
-                                PrimitiveNode::Make(
-                                        name_prefix + nm + '_' + std::to_string(i),
-                                        parquet::Repetition::REQUIRED,
-                                        tp,
-                                        LogicalType::NONE)
-                        );
-                    }
-                } else if (f.type().arraySize() > 0){
-                    assert(false && "not handling fixed sized arrays of complex types at the moment");
-                }
-
-                continue;
-            }
-
-
-            // scalars
-            if (f.type().typeID() == RosIntrospection::BuiltinType::STRING ){
-                parquet_fields->push_back(PrimitiveNode::Make(
-                        name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
-                        Type::BYTE_ARRAY, LogicalType::UTF8));
-            }  else if (f.type().typeID() == RosIntrospection::TIME){
-                parquet_fields->push_back(PrimitiveNode::Make(
-                        name_prefix + f.name().toStdString() + "_sec", parquet::Repetition::REQUIRED,
-                        Type::INT32, LogicalType::NONE));
-
-                parquet_fields->push_back(PrimitiveNode::Make(
-                        name_prefix + f.name().toStdString() + "_nsec", parquet::Repetition::REQUIRED,
-                        Type::INT32, LogicalType::NONE));
-            } else if (f.type().isBuiltin()) { // non strings
-                // timestamp is a special case of a composite built in
-                parquet_fields->push_back(PrimitiveNode::Make(
-                        name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
-                        to_parquet_type(f.type().typeID()), LogicalType::NONE));
-            } else {
-                auto msg = tp.GetMessage(f.type());
-                toParquetSchema(name_prefix + f.name().toStdString() + '_', *msg, tp, parquet_fields);
-            }
-        }
-    }
-
-
-    void EmitCreateStatement(const typeinfo &typeinfo) {
-        m_loadscript << "CREATE TABLE IF NOT EXISTS "
-                     << typeinfo.clean_tp << " (" << endl;
-
-        m_loadscript << "  file_id INTEGER NOT NULL DEFAULT currval(:fileseq)" << endl;
-
-        for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
-            auto &fld = typeinfo.parquet_schema->field(i);
-            m_loadscript << ", ";
-            m_loadscript << fld->name() << " ";
-            assert(fld->is_primitive());
-            assert(!fld->is_repeated());
-            m_loadscript << GetVerticaType(
-                    static_cast<parquet::schema::PrimitiveNode*>(fld.get())) << endl;
-        }
-        m_loadscript << ");" << endl << endl;
-
-        // emit client statement to set a variable
-        // allows us to run with -v path=PATH
-        m_loadscript << "\\set abs_path '\\'':path:'/";
-        m_loadscript << boost::filesystem::path(typeinfo.filename).filename().native();
-        m_loadscript << "\\''" << endl << endl;
-
-        m_loadscript << "COPY " << typeinfo.clean_tp << "(" << endl;
-        for (int i = 0; i < typeinfo.parquet_schema->field_count(); ++i){
-            auto &fld = typeinfo.parquet_schema->field(i);
-            if (i > 0) {
-                m_loadscript << ", ";
-            }
-            m_loadscript << fld->name() << endl;
-        }
-        m_loadscript << ") FROM :abs_path PARQUET DIRECT NO COMMIT;" << endl << endl;
-    }
-
-    // inits info if not yet.
     typeinfo& getInfo(const rosbag::MessageInstance &msg) {
-        auto & typeinfo = m_pertype[msg.getDataType()];
+        auto iter = m_pertype.find(msg.getDataType());
 
         // use parquet_schema as a proxy for ovrall initialization
-        if (!typeinfo.parquet_schema) {
+        if (iter == m_pertype.end()) {
             // Create a ParquetFileWriter instance once
-
-            typeinfo.rostypename = msg.getDataType();
-            typeinfo.clean_tp = move(regex_replace(typeinfo.rostypename, regex("/"), "_"));
-            typeinfo.type_list = RosIntrospection::buildROSTypeMapFromDefinition(
-                    msg.getDataType(),
-                    msg.getMessageDefinition());
-
-            typeinfo.ros_message = &typeinfo.type_list[0];
-
-            // Setup the parquet schema
-            parquet::schema::NodeVector parquet_fields;
-
-            // seqno and topic
-            parquet_fields.push_back(
-                    parquet::schema::PrimitiveNode::Make("seqno", // unique within bagfile
-                                                         parquet::Repetition::REQUIRED,
-                                                         parquet::Type::INT64));
-
-//            parquet_fields.push_back(
-//                    parquet::schema::PrimitiveNode::Make("topic",
-//                                                         parquet::Repetition::REQUIRED,
-//                                                         parquet::Type::BYTE_ARRAY,
-//                                                         parquet::LogicalType::UTF8));
-
-            toParquetSchema("", *typeinfo.ros_message, typeinfo, &parquet_fields);
-
-            typeinfo.parquet_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
-                    parquet::schema::GroupNode::Make(typeinfo.clean_tp,
-                                    parquet::Repetition::REQUIRED,
-                                    parquet_fields));
-
-
-            cerr << "******* found type " << msg.getDataType() << endl;
-            cerr << "******* ROS msg definition: " << msg.getDataType() << endl;
-            stringstream defn(msg.getMessageDefinition());
-            for (string line; std::getline(defn, line);) {
-                boost::trim(line);
-                if (line.empty()) continue;
-                if (line.compare(0, 1, "#") == 0) continue;
-                if (line.compare(0, 1, "=") == 0) break; // skip derived definitions
-                if (find(line.begin(), line.end(), '=') != line.end()) continue;
-                cerr << "  " << line << endl;
-            }
-            cerr << "******* Generated parquet schema: " << endl;
-            parquet::schema::PrintSchema(typeinfo.parquet_schema.get(), cerr);
-            cerr << "***********************" << endl;
-
-            if (typeinfo.parquet_schema->field_count() == 0) {
-                cerr << "NOTE: current generated schema is empty... skipping this type" << endl;
-                return typeinfo;
-            }
-
-            // file
-            typeinfo.filename = m_dirname + "/" + typeinfo.clean_tp + ".parquet";
-            // Create a local file output stream instance.
-            using FileClass = ::arrow::io::FileOutputStream;
-            auto dnme = msg.getDataType();
-            PARQUET_THROW_NOT_OK(FileClass::Open(typeinfo.filename, &typeinfo.out_file));
-
-            // Add writer properties
-            parquet::WriterProperties::Builder builder;
-            builder.compression(parquet::Compression::SNAPPY);
-            std::shared_ptr<parquet::WriterProperties> props = builder.build();
-
-            typeinfo.file_writer =
-                    parquet::ParquetFileWriter::Open(typeinfo.out_file, typeinfo.parquet_schema, props);
-            //    Append a RowGroup with a specific number of rows.
-            //typeinfo.rg_writer = typeinfo.file_writer->AppendRowGroup(NUM_ROWS_PER_ROW_GROUP);
-            //assert(typeinfo.parquet_schema->field_count() == typeinfo.ros_message->fields().size());
+            m_pertype.emplace(msg.getDataType(), typeinfo(msg.getDataType(),
+                                                           msg.getMD5Sum(),
+                                                           m_dirname,
+                                                           msg.getMessageDefinition()));
+            iter = m_pertype.find(msg.getDataType());
 
             // emit create statement to load data easily
-            EmitCreateStatement(typeinfo);
-
-            // initialize columns vectors
-            typeinfo.columns.resize(typeinfo.parquet_schema->field_count());
+            EmitCreateStatement(iter->second.clean_tp, iter->second.filename,
+                                *iter->second.parquet_schema, m_loadscript);
         }
 
-        return typeinfo;
+        assert(msg.getMD5Sum() == iter->second.md5sum);
+        return iter->second;
     }
 
     std::vector<uint8_t> m_buffer;
@@ -767,6 +787,8 @@ private:
     const string m_dirname;
     ofstream m_loadscript;
     std::unordered_map<std::string, typeinfo> m_pertype;
+    TableBuffer m_streamtable;
+    TableBuffer m_connectiontable;
 };
 
 
