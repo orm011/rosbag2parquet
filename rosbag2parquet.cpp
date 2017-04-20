@@ -184,6 +184,17 @@ class FlattenedRosWriter {
             file_writer->Close();
             out_file->Close();
         }
+
+        void updateCountMaybeFlush(){
+            // update counts
+            rows_since_last_reset +=1;
+            total_rows += 1;
+
+            // check for batch size
+            if (rows_since_last_reset == NUM_ROWS_PER_ROW_GROUP){
+                FlushBuffers();
+            }
+        }
     };
 
 
@@ -206,15 +217,7 @@ class FlattenedRosWriter {
             assert(pos == this->output_buf.parquet_schema->field_count());
             // all bytes seen
             assert(buffer == buffer_end);
-
-            // update counts
-            this->output_buf.rows_since_last_reset +=1;
-            this->output_buf.total_rows += 1;
-
-            // check for batch size
-            if (this->output_buf.rows_since_last_reset == NUM_ROWS_PER_ROW_GROUP){
-                this->output_buf.FlushBuffers();
-            }
+            this->output_buf.updateCountMaybeFlush();
         }
 
         void handleMessage(
@@ -705,12 +708,20 @@ public:
     }
 
 
-    void writeMsg(const rosbag::MessageInstance& msg){
+    int64_t RecordMessageMetadata(const rosbag::MessageInstance &msg){
+        auto seqno = m_seqno++;
+        // records connection metadata into the connection table if needed
+        // records stream metadata into the streamtable
+        return seqno;
+    }
+
+    void RecordMessageData(const rosbag::MessageInstance &msg){
+        auto seqno = RecordMessageMetadata(msg);
+
 //            uint32_t topic_size = (uint32_t)msg.getTopic().size();
             //uint32_t bagname_size = (uint32_t)m_bagname.size();
-
             auto buffer_len =
-                    sizeof(m_seqno) +
+                    sizeof(seqno) +
 //                    sizeof(topic_size) + topic_size +
 //                    sizeof(bagname_size) + bagname_size +
                     msg.size();
@@ -738,8 +749,8 @@ public:
                 RosIntrospection::ROSType rtype(msg.getDataType());
             }
 
-        GetHandler(msg).addRow(msg, m_buffer.data(), m_buffer.data() + m_buffer.size());
-            m_seqno++;
+        GetHandler(msg).addRow(msg, m_buffer.data(),
+                               m_buffer.data() + m_buffer.size());
     }
 
     void Close() {
@@ -831,7 +842,7 @@ int main(int argc, char **argv)
     FlattenedRosWriter outputs(FLAGS_bagfile, opath.native());
 
     for (const auto & msg : view) {
-        outputs.writeMsg(msg);
+        outputs.RecordMessageData(msg);
         count+= 1;
     }
 
