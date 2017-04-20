@@ -327,6 +327,9 @@ class FlattenedRosWriter {
                     const uint8_t *const buffer_start,
                     const uint8_t *const buffer_end)
         {
+            // check if the pointers match:
+            // msg.getConnectionHeader().get()
+
             // push raw bytes onto column buffers
             int pos = 0;
             auto buffer = buffer_start;
@@ -712,15 +715,24 @@ class FlattenedRosWriter {
 
 public:
 
-
-
-    FlattenedRosWriter(const string& bagname, const string& dirname) :
-            m_bagname(bagname), m_dirname(dirname),
-            m_loadscript(dirname + "/vertica_load_tables.sql")
+    FlattenedRosWriter(const string& bagname, const string& dirname, std::vector<const rosbag::ConnectionInfo*> conns)
+            : m_bagname(bagname), m_dirname(dirname),
+              m_loadscript(dirname + "/vertica_load_tables.sql"),
+              m_conns(move(conns))
     {
         InitLoadScript();
         InitStreamTable();
         InitConnectionTable();
+
+        // need: match message to its connection id
+        // TODO: could just parse connection header ourselves and store that.
+        // then match messages to connections via headers.
+        // this works if the header is there through the whole of
+        for (const auto * c : m_conns){
+            auto ret = m_conns_by_header.emplace(c->header.get(), make_pair(false, c));
+            // we assume headers identify connections uniquely
+            assert(ret.second);
+        }
     }
 
     void InitLoadScript() {
@@ -765,7 +777,7 @@ public:
                                         parquet::LogicalType::UINT_32)
             );
 
-            m_streamtable = TableBuffer(m_dirname, "message_stream", parquet_fields);
+            m_streamtable = TableBuffer(m_dirname, "Messages", parquet_fields);
             m_streamtable.EmitCreateStatement(m_loadscript);
         }
 
@@ -783,7 +795,6 @@ public:
                                     parquet::Repetition::REQUIRED,
                                     parquet::Type::INT32, parquet::LogicalType::UINT_32)
         );
-
 
         parquet_fields.push_back(
                 PrimitiveNode::Make("topic", // from index, not from header
@@ -809,15 +820,67 @@ public:
                                     parquet::LogicalType::UTF8)
         );
 
-        m_connectiontable = TableBuffer(m_dirname, "connections", parquet_fields);
+        m_connectiontable = TableBuffer(m_dirname, "Connections", parquet_fields);
         m_connectiontable.EmitCreateStatement(m_loadscript);
     }
 
+    // only works for simple types
+    template <typename T>
+    void InsertToBuffer(int bufno, T val, TableBuffer* buf, const char* data = nullptr){
+        static_assert(sizeof(T) == 4 || sizeof(T) == 8); // only for int32 or int64 types
+
+        if (data){
+            // TODO, widen the other code to use 64 bit lengths?
+            assert(val < (1UL<<31)); // for things coming out as strings
+            auto len = (uint32_t) val;
+
+            auto & vec = buf->columns[bufno].first;
+            vec.insert(vec.end(),
+                       (const char*)&len,
+                       (const char*)&len + sizeof(len)
+            );
+
+            // then, val is assumed to be a length
+            auto &datavec = buf->columns[bufno].second;
+            datavec.insert(datavec.end(), data, data + val);
+        } else {
+            auto & vec = buf->columns[bufno].first;
+            vec.insert(vec.end(),
+                       (const char*)&val,
+                       (const char*)&val + sizeof(T)
+            );
+        }
+    }
+
     int64_t RecordMessageMetadata(const rosbag::MessageInstance &msg){
-        auto seqno = m_seqno++;
         // records connection metadata into the connection table if needed
         // records stream metadata into the streamtable
-        return seqno;
+        InsertToBuffer(0, m_seqno, &m_streamtable);
+        InsertToBuffer(1, msg.getTime().sec, &m_streamtable);
+        InsertToBuffer(2, msg.getTime().nsec, &m_streamtable);
+
+        // assuming we got all connections earlier
+        auto f = m_conns_by_header.find(msg.getConnectionHeader().get());
+        assert (f!=m_conns_by_header.end());
+        f->second.first = true;
+
+        assert(f->second.second->datatype.size());
+        InsertToBuffer(3, f->second.second->id, &m_streamtable);
+        m_streamtable.updateCountMaybeFlush();
+
+        return m_seqno++;
+    }
+
+    void RecordAllConnectionMetadata(){
+        for (const auto * c: m_conns) {
+            auto & conn = *c;
+            InsertToBuffer(0, conn.id, &m_connectiontable);
+            InsertToBuffer(1, conn.topic.size(), &m_connectiontable, conn.topic.data());
+            InsertToBuffer(2, conn.datatype.size(), &m_connectiontable, conn.datatype.data());
+            InsertToBuffer(3, conn.md5sum.size(), &m_connectiontable, conn.md5sum.data());
+            InsertToBuffer(4, conn.msg_def.size(), &m_connectiontable, conn.msg_def.data());
+            m_connectiontable.updateCountMaybeFlush();
+        }
     }
 
     void RecordMessageData(const rosbag::MessageInstance &msg){
@@ -859,11 +922,19 @@ public:
     }
 
     void Close() {
+        RecordAllConnectionMetadata();
+        m_connectiontable.Close();
+
+
         for (auto &kv : m_pertype) {
             if (kv.second.output_buf.parquet_schema->field_count()) {
                 kv.second.output_buf.Close();
             }
         }
+
+        m_streamtable.Close();
+
+
 
         m_loadscript << "CREATE TABLE IF NOT EXISTS files (" << endl;
         m_loadscript << "  file_id INTEGER PRIMARY KEY DEFAULT currval(:fileseq)" << endl;
@@ -906,6 +977,8 @@ private:
     uint64_t m_seqno = 0;
     const string m_dirname;
     ofstream m_loadscript;
+    std::vector<const rosbag::ConnectionInfo*> m_conns;
+    std::unordered_map<void*, pair<bool, const rosbag::ConnectionInfo*>> m_conns_by_header;
     std::unordered_map<std::string, MsgTable> m_pertype;
     TableBuffer m_streamtable;
     TableBuffer m_connectiontable;
@@ -944,7 +1017,7 @@ int main(int argc, char **argv)
     }
 
     int64_t count = 0;
-    FlattenedRosWriter outputs(FLAGS_bagfile, opath.native());
+    FlattenedRosWriter outputs(FLAGS_bagfile, opath.native(), view.getConnections());
 
     for (const auto & msg : view) {
         outputs.RecordMessageData(msg);
