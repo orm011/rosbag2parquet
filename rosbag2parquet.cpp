@@ -884,28 +884,12 @@ public:
     }
 
     void RecordMessageData(const rosbag::MessageInstance &msg){
-        auto seqno = RecordMessageMetadata(msg);
-
-//            uint32_t topic_size = (uint32_t)msg.getTopic().size();
-            //uint32_t bagname_size = (uint32_t)m_bagname.size();
-            auto buffer_len =
-                    sizeof(seqno) +
-//                    sizeof(topic_size) + topic_size +
-//                    sizeof(bagname_size) + bagname_size +
-                    msg.size();
+            auto seqno = RecordMessageMetadata(msg);
+            auto buffer_len = sizeof(seqno) + msg.size();
 
             m_buffer.clear();
             m_buffer.reserve(buffer_len);
-
-            // hack: copy seq no and topic into the buffer and treat them as message entities
-            // SEQ, TOPIC
             m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
-
-//            m_buffer.insert(m_buffer.end(), (uint8_t*)&topic_size, (uint8_t*)&topic_size + sizeof(topic_size));
-//            m_buffer.insert(m_buffer.end(), msg.getTopic().begin(), msg.getTopic().end());
-
-//            m_buffer.insert(m_buffer.end(), (uint8_t*)&bagname_size, (uint8_t*)&bagname_size + sizeof(bagname_size));
-//            m_buffer.insert(m_buffer.end(), m_bagname.begin(), m_bagname.end());
 
             assert(m_buffer.capacity() - m_buffer.size() >= msg.size());
             {
