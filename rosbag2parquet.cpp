@@ -631,13 +631,13 @@ const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
         case parquet::Type::BYTE_ARRAY:
             switch (nd->logical_type()){
                 case parquet::LogicalType::UTF8:
-                    return "VARCHAR";
+                    return "VARCHAR(:max_varchar)";
                 case parquet::LogicalType::NONE:
-                    return "VARBINARY";
+                    return "LONG VARBINARY(:max_long_varbinary)";
                 default:
                     cerr << "warning: unknown byte array combo";
                     parquet::schema::PrintSchema(nd, cerr);
-                    return "VARBINARY";
+                    return "LONG VARBINARY(:max_long_varbinary)";
             }
         case parquet::Type::FLOAT:
             return "FLOAT";
@@ -700,7 +700,10 @@ public:
             m_loadscript(dirname + "/vertica_load_tables.sql")
     {
         m_loadscript << "CREATE SCHEMA IF NOT EXISTS :schema;" << endl;
-        m_loadscript << "set search_path=:schema;" << endl << endl;
+        m_loadscript << "set search_path to :schema, public;" << endl << endl;
+        m_loadscript << "-- using max var type lengths allowed by vertica before it truncates" << endl;
+        m_loadscript << "\\set :max_varchar 65000" << endl;
+        m_loadscript << "\\set :max_long_varbinary 32000000" << endl;
         m_loadscript << "--  need to pass -v fileseq=<file sequence> (create a sequence if needed)" << endl;
         m_loadscript << "\\set fileseq '\\'':fileseq'\\''" << endl;
         m_loadscript << "-- gets a unique sequence number and begins transaction" << endl;
