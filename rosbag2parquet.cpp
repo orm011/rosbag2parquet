@@ -731,6 +731,7 @@ public:
         for (const auto * c : m_conns){
             auto ret = m_conns_by_header.emplace(c->header.get(), make_pair(false, c));
             // we assume headers identify connections uniquely
+            (void)ret;  // use var
             assert(ret.second);
         }
     }
@@ -827,7 +828,7 @@ public:
     // only works for simple types
     template <typename T>
     void InsertToBuffer(int bufno, T val, TableBuffer* buf, const char* data = nullptr){
-        static_assert(sizeof(T) == 4 || sizeof(T) == 8); // only for int32 or int64 types
+        static_assert(sizeof(T) == 4 || sizeof(T) == 8, "only for int32 or int64 types");
 
         if (data){
             // TODO, widen the other code to use 64 bit lengths?
