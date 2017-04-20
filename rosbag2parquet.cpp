@@ -46,6 +46,46 @@ using parquet::LogicalType;
 using parquet::schema::PrimitiveNode;
 using parquet::schema::GroupNode;
 
+
+const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
+{
+
+    switch(nd->physical_type()) {
+        case parquet::Type::INT32:
+        case parquet::Type::INT64:
+            // all integer types map to INTEGER,
+            // a vertica signed 64 bit integer (with no -2^63+1)
+            // if your data has UINT64 in the large range,
+            // Also, -2^63+1 is not going to be be handled correctly.
+            return "INTEGER";
+        case parquet::Type::BOOLEAN:
+            return "BOOLEAN";
+        case parquet::Type::BYTE_ARRAY:
+            switch (nd->logical_type()){
+                case parquet::LogicalType::UTF8:
+                    return "VARCHAR(:max_varchar)";
+                case parquet::LogicalType::NONE:
+                    return "LONG VARBINARY(:max_long_varbinary)";
+                default:
+                    cerr << "warning: unknown byte array combo";
+                    parquet::schema::PrintSchema(nd, cerr);
+                    return "LONG VARBINARY(:max_long_varbinary)";
+            }
+        case parquet::Type::FLOAT:
+            return "FLOAT";
+        case parquet::Type::DOUBLE:
+            return "DOUBLE PRECISION";
+        default:
+            cerr << "ERROR: no vertica type found for this parquet type"  << endl;
+            parquet::schema::PrintSchema(nd, cerr);
+            cerr.flush();
+            assert(false);
+    }
+
+    assert(false);
+    return 0;
+}
+
 template <typename T> T ReadFromBuffer(const uint8_t** buffer)
 {
     // Ros seems to de-facto settle for little endian order for its int types.
@@ -74,6 +114,55 @@ class FlattenedRosWriter {
     const char* action_string[SAVE+1] = {"SKIP", "SKIP_SCALAR", "SAVE"};
 
     struct TableBuffer {
+        TableBuffer() = default;
+
+        TableBuffer(const string& dirname, const string & tablename,
+                    const parquet::schema::NodeVector& fields) :
+        tablename(tablename)
+        {
+
+            // file
+            filename.append(dirname).append("/").append(tablename).append(".parquet");
+
+            /**
+             * buffer output initialization:
+             * 1) need parquet schema and output path info
+             * 2) check it isn't empty (legacy?)
+             * 2.5) create file in right directory with parquet ending
+             * 3) create parquet output file using filename
+             * 4) create a file writer out of that file
+             * 5) init the buffer columns to be indexable
+             */
+            parquet_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
+                    parquet::schema::GroupNode::Make(tablename,
+                                                     parquet::Repetition::REQUIRED,
+                                                     fields));
+
+            cerr << "******* Parquet schema: " << endl;
+            parquet::schema::PrintSchema(parquet_schema.get(), cerr);
+            cerr << "***********************" << endl;
+
+            if (parquet_schema->field_count() == 0) {
+                cerr << "NOTE: current generated schema is empty... skipping this type" << endl;
+                assert(0);
+            }
+
+            // Create a local file output stream instance.
+            PARQUET_THROW_NOT_OK(::arrow::io::FileOutputStream::Open(filename, &out_file));
+
+            // Add writer properties
+            parquet::WriterProperties::Builder builder;
+            builder.compression(parquet::Compression::SNAPPY);
+            std::shared_ptr<parquet::WriterProperties> props = builder.build();
+
+            file_writer = parquet::ParquetFileWriter::Open(
+                    out_file, parquet_schema, props);
+
+            // initialize columns vectors
+            columns.resize(parquet_schema->field_count());
+        }
+
+        std::string tablename;
         std::string filename;
         std::shared_ptr<parquet::schema::GroupNode> parquet_schema;
         std::shared_ptr<arrow::io::FileOutputStream> out_file;
@@ -85,6 +174,40 @@ class FlattenedRosWriter {
                 vector<char>,
                 vector<char> // for variable length types
         >> columns;
+
+        void EmitCreateStatement(ostream& out) {
+            out << "CREATE TABLE IF NOT EXISTS "
+                << tablename << " (" << endl;
+
+            out << "  file_id INTEGER NOT NULL DEFAULT currval(:fileseq)" << endl;
+
+            for (int i = 0; i < parquet_schema->field_count(); ++i){
+                auto &fld = parquet_schema->field(i);
+                out << ", ";
+                out << fld->name() << " ";
+                assert(fld->is_primitive());
+                assert(!fld->is_repeated());
+                out << GetVerticaType(
+                        static_cast<parquet::schema::PrimitiveNode*>(fld.get())) << endl;
+            }
+            out << ");" << endl << endl;
+
+            // emit client statement to set a variable
+            // allows us to run with -v path=PATH
+            out << "\\set abs_path '\\'':path:'/";
+            out << boost::filesystem::path(filename).filename().native();
+            out << "\\''" << endl << endl;
+
+            out << "COPY " << tablename << "(" << endl;
+            for (int i = 0; i < parquet_schema->field_count(); ++i){
+                auto &fld = parquet_schema->field(i);
+                if (i > 0) {
+                    out << ", ";
+                }
+                out << fld->name() << endl;
+            }
+            out << ") FROM :abs_path PARQUET DIRECT NO COMMIT;" << endl << endl;
+        }
 
         void FlushBuffers(){
             auto batch_size = rows_since_last_reset;
@@ -537,11 +660,6 @@ class FlattenedRosWriter {
 
             toParquetSchema("", *ros_message, &parquet_fields);
 
-            output_buf.parquet_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
-                    parquet::schema::GroupNode::Make(clean_tp,
-                                                     parquet::Repetition::REQUIRED,
-                                                     parquet_fields));
-
 
             cerr << "******* found type " << this->rostypename << endl;
             cerr << "******* ROS msg definition: " << this->rostypename << endl;
@@ -554,33 +672,8 @@ class FlattenedRosWriter {
                 if (find(line.begin(), line.end(), '=') != line.end()) continue;
                 cerr << "  " << line << endl;
             }
-            cerr << "******* Generated parquet schema: " << endl;
-            parquet::schema::PrintSchema(output_buf.parquet_schema.get(), cerr);
-            cerr << "***********************" << endl;
 
-            if (output_buf.parquet_schema->field_count() == 0) {
-                cerr << "NOTE: current generated schema is empty... skipping this type" << endl;
-                assert(0);
-            }
-
-            // file
-            output_buf.filename.append(dirname).append("/").append(clean_tp).append(".parquet");
-
-            // Create a local file output stream instance.
-            using FileClass = ::arrow::io::FileOutputStream;
-            PARQUET_THROW_NOT_OK(FileClass::Open(output_buf.filename, &output_buf.out_file));
-
-            // Add writer properties
-            parquet::WriterProperties::Builder builder;
-            builder.compression(parquet::Compression::SNAPPY);
-            std::shared_ptr<parquet::WriterProperties> props = builder.build();
-
-            output_buf.file_writer =
-                    parquet::ParquetFileWriter::Open(output_buf.out_file,
-                                                     output_buf.parquet_schema, props);
-
-            // initialize columns vectors
-            output_buf.columns.resize(output_buf.parquet_schema->field_count());
+            this->output_buf = TableBuffer(dirname, clean_tp, parquet_fields);
         }
 
         RosIntrospection::ROSTypeList type_list;
@@ -616,81 +709,6 @@ class FlattenedRosWriter {
     };
 
 
-const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
-{
-
-    switch(nd->physical_type()) {
-        case parquet::Type::INT32:
-        case parquet::Type::INT64:
-            // all integer types map to INTEGER,
-            // a vertica signed 64 bit integer (with no -2^63+1)
-            // if your data has UINT64 in the large range,
-            // Also, -2^63+1 is not going to be be handled correctly.
-            return "INTEGER";
-        case parquet::Type::BOOLEAN:
-            return "BOOLEAN";
-        case parquet::Type::BYTE_ARRAY:
-            switch (nd->logical_type()){
-                case parquet::LogicalType::UTF8:
-                    return "VARCHAR(:max_varchar)";
-                case parquet::LogicalType::NONE:
-                    return "LONG VARBINARY(:max_long_varbinary)";
-                default:
-                    cerr << "warning: unknown byte array combo";
-                    parquet::schema::PrintSchema(nd, cerr);
-                    return "LONG VARBINARY(:max_long_varbinary)";
-            }
-        case parquet::Type::FLOAT:
-            return "FLOAT";
-        case parquet::Type::DOUBLE:
-            return "DOUBLE PRECISION";
-        default:
-            cerr << "ERROR: no vertica type found for this parquet type"  << endl;
-            parquet::schema::PrintSchema(nd, cerr);
-            cerr.flush();
-            assert(false);
-    }
-
-    assert(false);
-    return 0;
-}
-
-    void EmitCreateStatement(const string &table_name, const string& filename,
-                             const parquet::schema::GroupNode & parquet_schema,
-                             ostream& out) {
-        out << "CREATE TABLE IF NOT EXISTS "
-            << table_name << " (" << endl;
-
-        out << "  file_id INTEGER NOT NULL DEFAULT currval(:fileseq)" << endl;
-
-        for (int i = 0; i < parquet_schema.field_count(); ++i){
-            auto &fld = parquet_schema.field(i);
-            out << ", ";
-            out << fld->name() << " ";
-            assert(fld->is_primitive());
-            assert(!fld->is_repeated());
-            out << GetVerticaType(
-                    static_cast<parquet::schema::PrimitiveNode*>(fld.get())) << endl;
-        }
-        out << ");" << endl << endl;
-
-        // emit client statement to set a variable
-        // allows us to run with -v path=PATH
-        out << "\\set abs_path '\\'':path:'/";
-        out << boost::filesystem::path(filename).filename().native();
-        out << "\\''" << endl << endl;
-
-        out << "COPY " << table_name << "(" << endl;
-        for (int i = 0; i < parquet_schema.field_count(); ++i){
-            auto &fld = parquet_schema.field(i);
-            if (i > 0) {
-                out << ", ";
-            }
-            out << fld->name() << endl;
-        }
-        out << ") FROM :abs_path PARQUET DIRECT NO COMMIT;" << endl << endl;
-    }
-
 
 public:
 
@@ -700,6 +718,12 @@ public:
             m_bagname(bagname), m_dirname(dirname),
             m_loadscript(dirname + "/vertica_load_tables.sql")
     {
+        InitLoadScript();
+        InitStreamTable();
+        InitConnectionTable();
+    }
+
+    void InitLoadScript() {
         m_loadscript << "CREATE SCHEMA IF NOT EXISTS :schema;" << endl;
         m_loadscript << "set search_path to :schema, public;" << endl << endl;
         m_loadscript << "-- using max var type lengths allowed by vertica before it truncates" << endl;
@@ -711,6 +735,83 @@ public:
         m_loadscript << "SELECT nextval(:fileseq);" << endl << endl;
     }
 
+    void InitStreamTable()
+        {
+            using namespace parquet::schema;
+            // Setup the parquet schema
+            NodeVector parquet_fields;
+
+            // seqno and topic
+            parquet_fields.push_back(
+                    PrimitiveNode::Make("seqno", // unique within bagfile
+                                       parquet::Repetition::REQUIRED, parquet::Type::INT64)
+            );
+
+            parquet_fields.push_back(
+                    PrimitiveNode::Make("time_sec", // from index, not from header
+                                        parquet::Repetition::REQUIRED, parquet::Type::INT32,
+                                        parquet::LogicalType::UINT_32)
+            );
+
+            parquet_fields.push_back(
+                    PrimitiveNode::Make("time_nsec", // from bagfile, not from header
+                                        parquet::Repetition::REQUIRED, parquet::Type::INT32,
+                                        parquet::LogicalType::UINT_32)
+            );
+
+            parquet_fields.push_back(
+                    PrimitiveNode::Make("connection_id", // from bagfile, not from header
+                                        parquet::Repetition::REQUIRED, parquet::Type::INT32,
+                                        parquet::LogicalType::UINT_32)
+            );
+
+            m_streamtable = TableBuffer(m_dirname, "message_stream", parquet_fields);
+            m_streamtable.EmitCreateStatement(m_loadscript);
+        }
+
+
+    void InitConnectionTable(){
+        // see rosbag/structures.h ConnectionInfo
+
+        using namespace parquet::schema;
+        // Setup the parquet schema
+        NodeVector parquet_fields;
+
+        // seqno and topic
+        parquet_fields.push_back(
+                PrimitiveNode::Make("connection_id", // unique within bagfile
+                                    parquet::Repetition::REQUIRED,
+                                    parquet::Type::INT32, parquet::LogicalType::UINT_32)
+        );
+
+
+        parquet_fields.push_back(
+                PrimitiveNode::Make("topic", // from index, not from header
+                                    parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
+                                    parquet::LogicalType::UTF8)
+        );
+
+        parquet_fields.push_back(
+                PrimitiveNode::Make("datatype", // from bagfile, not from header
+                                    parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
+                                    parquet::LogicalType::UTF8)
+        );
+
+        parquet_fields.push_back(
+                PrimitiveNode::Make("md5sum", // from bagfile, not from header
+                                    parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
+                                    parquet::LogicalType::UTF8)
+        );
+
+        parquet_fields.push_back(
+                PrimitiveNode::Make("msg_def", // from bagfile, not from header
+                                    parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
+                                    parquet::LogicalType::UTF8)
+        );
+
+        m_connectiontable = TableBuffer(m_dirname, "connections", parquet_fields);
+        m_connectiontable.EmitCreateStatement(m_loadscript);
+    }
 
     int64_t RecordMessageMetadata(const rosbag::MessageInstance &msg){
         auto seqno = m_seqno++;
@@ -782,7 +883,7 @@ private:
     MsgTable& GetHandler(const rosbag::MessageInstance &msg) {
         auto iter = m_pertype.find(msg.getDataType());
 
-        // use parquet_schema as a proxy for ovrall initialization
+        // use parquet_schema as a proxy for overall initialization
         if (iter == m_pertype.end()) {
             // Create a ParquetFileWriter instance once
             m_pertype.emplace(msg.getDataType(), MsgTable(msg.getDataType(),
@@ -790,10 +891,10 @@ private:
                                                            m_dirname,
                                                            msg.getMessageDefinition()));
             iter = m_pertype.find(msg.getDataType());
+            assert(iter != m_pertype.end());
 
             // emit create statement to load data easily
-            EmitCreateStatement(iter->second.clean_tp, iter->second.output_buf.filename,
-                                *iter->second.output_buf.parquet_schema, m_loadscript);
+            iter->second.output_buf.EmitCreateStatement(m_loadscript);
         }
 
         assert(msg.getMD5Sum() == iter->second.md5sum);
