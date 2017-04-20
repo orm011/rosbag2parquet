@@ -46,7 +46,32 @@ using parquet::LogicalType;
 using parquet::schema::PrimitiveNode;
 using parquet::schema::GroupNode;
 
+template <typename T> T ReadFromBuffer(const uint8_t** buffer)
+{
+    // Ros seems to de-facto settle for little endian order for its int types.
+    // (their wiki does not seem to specify this, however, so maybe it could up to
+    // the endianness of the machine that generated the message)
+    //
+    // If our machine were big endian (x86 is), reinterpreting
+    // would be wrong.
+    //
+    static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "implement portable int read");
+    T destination = (*(reinterpret_cast<const T *>( *buffer )));
+    *buffer += sizeof(T);
+    return destination;
+}
+
+
+
 class FlattenedRosWriter {
+
+    enum Action {
+        SKIP, // used for now, to be able to load the parts of data we can parse
+        SKIP_SCALAR, // act like it is a scalar, even if it is an array (hack)
+        SAVE
+    };
+
+    const char* action_string[SAVE+1] = {"SKIP", "SKIP_SCALAR", "SAVE"};
 
     struct TableBuffer {
         std::string filename;
@@ -162,7 +187,223 @@ class FlattenedRosWriter {
     };
 
 
-    struct typeinfo : public TableBuffer {
+    struct MsgTable  {
+
+        void addRow(const rosbag::MessageInstance& msg,
+                    const uint8_t *const buffer_start,
+                    const uint8_t *const buffer_end)
+        {
+            // push raw bytes onto column buffers
+            int pos = 0;
+            auto buffer = buffer_start;
+
+            handleBuiltin(&pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::INT64);
+            //handleBuiltin(MsgTable, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
+            //handleBuiltin(MsgTable, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
+            handleMessage(&pos, 0, SAVE, &buffer, buffer_end, this->ros_message);
+
+            // all fields saved
+            assert(pos == this->output_buf.parquet_schema->field_count());
+            // all bytes seen
+            assert(buffer == buffer_end);
+
+            // update counts
+            this->output_buf.rows_since_last_reset +=1;
+            this->output_buf.total_rows += 1;
+
+            // check for batch size
+            if (this->output_buf.rows_since_last_reset == NUM_ROWS_PER_ROW_GROUP){
+                this->output_buf.FlushBuffers();
+            }
+        }
+
+        void handleMessage(
+                int* flat_pos,
+                int recursion_depth,
+                Action action,
+                const uint8_t **buffer,
+                const uint8_t *buffer_end,
+                const RosIntrospection::ROSMessage* msgdef) {
+            assert(*buffer < buffer_end);
+
+//        cout << string(recursion_depth, ' ') << action_string[action]
+//             << "ing " << fieldname << ":" << type << endl ;
+
+            for (auto & f : msgdef->fields()) {
+                //cout << string(recursion_depth, ' ') << "field  " << f.name()
+                //     << ":" << f.type().baseName() <<  endl ;
+
+                if (f.isConstant()) continue;
+
+                // saving only byte buffers (uint8 arrays) right now.
+                if (f.type().isArray()) {
+
+                    // handle uint8 vararray just like a string
+                    if (f.type().typeID() == RosIntrospection::BuiltinType::UINT8 && f.type().arraySize() < 0) {
+                        handleBuiltin(flat_pos, recursion_depth+1, action,
+                                      buffer, buffer_end, RosIntrospection::BuiltinType::STRING);
+                        continue;
+                    }
+
+
+                    // figure out how many things to skip
+                    auto rawlen = f.type().arraySize();
+                    uint32_t len = 0;
+                    if (rawlen >= 0) { // constant array
+                        len = rawlen;
+                    } else if (rawlen == -1) { // variable length array
+                        len = ReadFromBuffer<uint32_t>(buffer);
+                    }
+
+
+                    // fixed len arrays of builtins (may save)
+                    if (f.type().isBuiltin() && f.type().isArray() && f.type().arraySize() > 0) {
+                        for (int i = 0; i < f.type().arraySize(); ++i) {
+                            handleBuiltin(flat_pos, recursion_depth +1, action,
+                                          buffer, buffer_end, f.type().typeID());
+                        }
+                        continue;
+                    }
+
+                    // now skip them one by one
+                    for (uint32_t i = 0; i < len; ++i){
+                        // convert name to scalar (so it can be looked up)
+                        if (f.type().isBuiltin()){
+                            handleBuiltin(flat_pos, recursion_depth+1, SKIP_SCALAR, buffer,
+                                          buffer_end,f.type().typeID());
+                        } else {
+                            auto msg = GetMessage(f.type());
+                            handleMessage(flat_pos, recursion_depth + 1, SKIP_SCALAR, buffer, buffer_end,
+                                          msg);
+                        }
+                    }
+
+                    continue;
+                } else if (!f.type().isBuiltin()) {
+                    auto msg = this->GetMessage(f.type());
+                    handleMessage(flat_pos, recursion_depth + 1, action, buffer, buffer_end,
+                                  msg);
+                } else {
+                    handleBuiltin(flat_pos, recursion_depth + 1, action, buffer, buffer_end,
+                                  f.type().typeID());
+                }
+            }
+            //cout << endl;
+        }
+
+        void handleBuiltin(int* flat_pos,
+                           int recursion_depth,
+                           Action action,
+                           const uint8_t** buffer_ptr,
+                           const uint8_t* buffer_end,
+                           const RosIntrospection::BuiltinType  elemtype) {
+            assert(*buffer_ptr < buffer_end);
+//        cout << string(recursion_depth, ' ') << action_string[action] << "ing a " << field_name
+//             << ":" << elemtype << "pos " << *flat_pos << endl;
+
+            using RosIntrospection::BuiltinType;
+            pair<vector<char>, vector<char>>* vector_out;
+            if (action == SAVE){
+                vector_out = &this->output_buf.columns[*flat_pos];
+                assert(*flat_pos < this->output_buf.parquet_schema->field_count());
+                (*flat_pos) += 1;
+            }
+
+            switch (elemtype) {
+                case BuiltinType::INT8:
+                case BuiltinType::UINT8:
+                case BuiltinType::BYTE:
+                case BuiltinType::BOOL:
+                {
+                    // parquet has no single byte type. promoting to int.
+                    // (can add varint for later)
+                    auto tmp_tmp = ReadFromBuffer<int8_t>(buffer_ptr);
+                    auto tmp =(int32_t) tmp_tmp;
+                    if (action == SAVE) {
+                        vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
+                    }
+                    return;
+                }
+                case BuiltinType::INT16:
+                case BuiltinType::UINT16:
+                {
+                    // parquet has not two byte type. promoting to int.
+                    // (can add varint for later)
+                    auto tmp_tmp = ReadFromBuffer<int16_t>(buffer_ptr);
+                    auto tmp =(int32_t) tmp_tmp;
+                    if (action == SAVE) {
+                        vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
+                    }
+                    return;
+                }
+                case BuiltinType::UINT32:
+                case BuiltinType::INT32:
+                {
+                    auto tmp = ReadFromBuffer<int32_t>(buffer_ptr);
+                    if (action == SAVE) {
+                        vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
+                    }
+                    return;
+                }
+                case BuiltinType::FLOAT32: {
+                    auto tmp = ReadFromBuffer<float>(buffer_ptr);
+                    if (action == SAVE) {
+                        vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
+                    }
+                    return;
+                }
+                case BuiltinType::FLOAT64: {
+                    auto tmp = ReadFromBuffer<double>(buffer_ptr);
+                    if (action == SAVE) {
+                        vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
+                    }
+                    return;
+                }
+                case BuiltinType::INT64:
+                case BuiltinType::UINT64:
+                {
+                    auto tmp = ReadFromBuffer<int64_t>(buffer_ptr);
+                    if (action == SAVE) {
+                        vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
+                    }
+                    return;
+                }
+                case BuiltinType::TIME: { // 2 ints (secs/nanosecs)
+                    // handle as a composite type, call recusrsively
+                    auto secs = ReadFromBuffer<int32_t>(buffer_ptr);
+                    auto nsecs = ReadFromBuffer<int32_t>(buffer_ptr);
+
+                    if (action == SAVE){
+                        vector_out->first.insert(vector_out->first.end(), (char*)&secs, ((char*)&secs)+sizeof(secs));
+
+                        auto * vector_out2 = &this->output_buf.columns[*flat_pos];
+                        (*flat_pos) += (action == SAVE);
+                        vector_out2->first.insert(vector_out2->first.end(), (char*)&nsecs, ((char*)&nsecs)+sizeof(nsecs));
+                    }
+                    return;
+                }
+                case BuiltinType::STRING: {
+                    auto len = ReadFromBuffer<uint32_t>(buffer_ptr);
+                    auto begin = reinterpret_cast<char*>(&len);
+                    if (action == SAVE) {
+                        // for now, push lengths to first vector
+                        // and push bytes to second vector.
+                        // pinters into an vector get invalidated upon reallocation, so
+                        // we defer getting all pointers until flush time
+                        // at flush time, make an array to
+                        vector_out->first.insert(vector_out->first.end(), begin, begin + sizeof(len));
+                        vector_out->second.insert(vector_out->second.end(), *buffer_ptr, (*buffer_ptr) + len);
+                    }
+                    (*buffer_ptr)+=len;
+                    return;
+                }
+                default:
+                    cout << "TODO: add handler for type: " << elemtype << endl;
+                    assert(false);
+                    return;
+            }
+        }
+
 
         parquet::Type::type to_parquet_type(
                 RosIntrospection::BuiltinType ros_typ)
@@ -267,7 +508,7 @@ class FlattenedRosWriter {
             }
         }
 
-        typeinfo(const string& rostypename,
+        MsgTable(const string& rostypename,
                  const string& md5sum,
                  const string& name_prefix,
                  const string& msgdefinition)
@@ -293,7 +534,7 @@ class FlattenedRosWriter {
 
             toParquetSchema("", *ros_message, &parquet_fields);
 
-            parquet_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
+            output_buf.parquet_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
                     parquet::schema::GroupNode::Make(clean_tp,
                                                      parquet::Repetition::REQUIRED,
                                                      parquet_fields));
@@ -311,38 +552,42 @@ class FlattenedRosWriter {
                 cerr << "  " << line << endl;
             }
             cerr << "******* Generated parquet schema: " << endl;
-            parquet::schema::PrintSchema(parquet_schema.get(), cerr);
+            parquet::schema::PrintSchema(output_buf.parquet_schema.get(), cerr);
             cerr << "***********************" << endl;
 
-            if (parquet_schema->field_count() == 0) {
+            if (output_buf.parquet_schema->field_count() == 0) {
                 cerr << "NOTE: current generated schema is empty... skipping this type" << endl;
                 assert(0);
             }
 
             // file
-            filename = name_prefix + clean_tp + ".parquet";
+            output_buf.filename = name_prefix + clean_tp + ".parquet";
             // Create a local file output stream instance.
             using FileClass = ::arrow::io::FileOutputStream;
-            PARQUET_THROW_NOT_OK(FileClass::Open(filename, &out_file));
+            PARQUET_THROW_NOT_OK(FileClass::Open(output_buf.filename, &output_buf.out_file));
 
             // Add writer properties
             parquet::WriterProperties::Builder builder;
             builder.compression(parquet::Compression::SNAPPY);
             std::shared_ptr<parquet::WriterProperties> props = builder.build();
 
-            file_writer =
-                    parquet::ParquetFileWriter::Open(out_file, parquet_schema, props);
+            output_buf.file_writer =
+                    parquet::ParquetFileWriter::Open(output_buf.out_file,
+                                                     output_buf.parquet_schema, props);
 
             // initialize columns vectors
-            columns.resize(parquet_schema->field_count());
+            output_buf.columns.resize(output_buf.parquet_schema->field_count());
         }
 
         RosIntrospection::ROSTypeList type_list;
+        const RosIntrospection::ROSMessage* ros_message;
+
         std::string rostypename;
         std::string msgdefinition;
         std::string md5sum;
         std::string clean_tp;
-        const RosIntrospection::ROSMessage* ros_message;
+
+        TableBuffer output_buf;
 
         const RosIntrospection::ROSMessage* GetMessage(
                 const RosIntrospection::ROSType& tp) const {
@@ -446,20 +691,6 @@ const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
 public:
 
 
-    template <typename T> T ReadFromBuffer(const uint8_t** buffer)
-    {
-        // Ros seems to de-facto settle for little endian order for its int types.
-        // (their wiki does not seem to specify this, however, so maybe it could up to
-        // the endianness of the machine that generated the message)
-        //
-        // If our machine were big endian (x86 is), reinterpreting
-        // would be wrong.
-        //
-        static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "implement portable int read");
-        T destination = (*(reinterpret_cast<const T *>( *buffer )));
-        *buffer += sizeof(T);
-        return destination;
-    }
 
     FlattenedRosWriter(const string& bagname, const string& dirname) :
             m_bagname(bagname), m_dirname(dirname),
@@ -473,232 +704,6 @@ public:
         m_loadscript << "SELECT nextval(:fileseq);" << endl << endl;
     }
 
-    enum Action {
-        SKIP, // used for now, to be able to load the parts of data we can parse
-        SKIP_SCALAR, // act like it is a scalar, even if it is an array (hack)
-        SAVE
-    };
-
-    const char* action_string[SAVE+1] = {"SKIP", "SKIP_SCALAR", "SAVE"};
-
-
-    void addRow(const rosbag::MessageInstance& msg,
-                const uint8_t *const buffer_start,
-                const uint8_t *const buffer_end,
-                typeinfo &typeinfo)
-    {
-        // push raw bytes onto column buffers
-        int pos = 0;
-        auto buffer = buffer_start;
-
-        handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::INT64);
-        //handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
-        //handleBuiltin(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, RosIntrospection::STRING);
-        handleMessage(typeinfo, &pos, 0, SAVE, &buffer, buffer_end, typeinfo.ros_message);
-
-        // all fields saved
-        assert(pos == typeinfo.parquet_schema->field_count());
-        // all bytes seen
-        assert(buffer == buffer_end);
-
-        // update counts
-        typeinfo.rows_since_last_reset +=1;
-        typeinfo.total_rows += 1;
-
-        // check for batch size
-        if (typeinfo.rows_since_last_reset == NUM_ROWS_PER_ROW_GROUP){
-            typeinfo.FlushBuffers();
-        }
-    }
-
-    void handleMessage(
-            typeinfo & typeinfo,
-            int* flat_pos,
-            int recursion_depth,
-            Action action,
-            const uint8_t **buffer,
-            const uint8_t *buffer_end,
-            const RosIntrospection::ROSMessage* msgdef) {
-        assert(*buffer < buffer_end);
-
-//        cout << string(recursion_depth, ' ') << action_string[action]
-//             << "ing " << fieldname << ":" << type << endl ;
-
-        for (auto & f : msgdef->fields()) {
-            //cout << string(recursion_depth, ' ') << "field  " << f.name()
-            //     << ":" << f.type().baseName() <<  endl ;
-
-            if (f.isConstant()) continue;
-
-            // saving only byte buffers (uint8 arrays) right now.
-            if (f.type().isArray()) {
-
-                // handle uint8 vararray just like a string
-                if (f.type().typeID() == RosIntrospection::BuiltinType::UINT8 && f.type().arraySize() < 0) {
-                    handleBuiltin(typeinfo, flat_pos, recursion_depth+1, action,
-                    buffer, buffer_end, RosIntrospection::BuiltinType::STRING);
-                    continue;
-                }
-
-
-                // figure out how many things to skip
-                auto rawlen = f.type().arraySize();
-                uint32_t len = 0;
-                if (rawlen >= 0) { // constant array
-                    len = rawlen;
-                } else if (rawlen == -1) { // variable length array
-                    len = ReadFromBuffer<uint32_t>(buffer);
-                }
-
-
-                // fixed len arrays of builtins (may save)
-                if (f.type().isBuiltin() && f.type().isArray() && f.type().arraySize() > 0) {
-                    for (int i = 0; i < f.type().arraySize(); ++i) {
-                        handleBuiltin(typeinfo, flat_pos, recursion_depth +1, action,
-                                      buffer, buffer_end, f.type().typeID());
-                    }
-                    continue;
-                }
-
-                // now skip them one by one
-                for (uint32_t i = 0; i < len; ++i){
-                    // convert name to scalar (so it can be looked up)
-                    if (f.type().isBuiltin()){
-                        handleBuiltin(typeinfo, flat_pos, recursion_depth+1, SKIP_SCALAR, buffer,
-                                      buffer_end,f.type().typeID());
-                    } else {
-                        auto msg = typeinfo.GetMessage(f.type());
-                        handleMessage(typeinfo, flat_pos, recursion_depth + 1, SKIP_SCALAR, buffer, buffer_end,
-                                      msg);
-                    }
-                }
-
-                continue;
-            } else if (!f.type().isBuiltin()) {
-                auto msg = typeinfo.GetMessage(f.type());
-                handleMessage(typeinfo, flat_pos, recursion_depth + 1, action, buffer, buffer_end,
-                              msg);
-            } else {
-                handleBuiltin(typeinfo, flat_pos, recursion_depth + 1, action, buffer, buffer_end,
-                              f.type().typeID());
-            }
-        }
-        //cout << endl;
-    }
-
-    void handleBuiltin(typeinfo& tp,
-                       int* flat_pos,
-                       int recursion_depth,
-                       Action action,
-                       const uint8_t** buffer_ptr,
-                       const uint8_t* buffer_end,
-                       const RosIntrospection::BuiltinType  elemtype) {
-        assert(*buffer_ptr < buffer_end);
-//        cout << string(recursion_depth, ' ') << action_string[action] << "ing a " << field_name
-//             << ":" << elemtype << "pos " << *flat_pos << endl;
-
-        using RosIntrospection::BuiltinType;
-        pair<vector<char>, vector<char>>* vector_out;
-        if (action == SAVE){
-            vector_out = &tp.columns[*flat_pos];
-            assert(*flat_pos < tp.parquet_schema->field_count());
-            (*flat_pos) += 1;
-        }
-
-        switch (elemtype) {
-            case BuiltinType::INT8:
-            case BuiltinType::UINT8:
-            case BuiltinType::BYTE:
-            case BuiltinType::BOOL:
-            {
-                // parquet has no single byte type. promoting to int.
-                // (can add varint for later)
-                auto tmp_tmp = ReadFromBuffer<int8_t>(buffer_ptr);
-                auto tmp =(int32_t) tmp_tmp;
-                if (action == SAVE) {
-                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
-                }
-                return;
-            }
-            case BuiltinType::INT16:
-            case BuiltinType::UINT16:
-            {
-                // parquet has not two byte type. promoting to int.
-                // (can add varint for later)
-                auto tmp_tmp = ReadFromBuffer<int16_t>(buffer_ptr);
-                auto tmp =(int32_t) tmp_tmp;
-                if (action == SAVE) {
-                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
-                }
-                return;
-            }
-            case BuiltinType::UINT32:
-            case BuiltinType::INT32:
-            {
-                auto tmp = ReadFromBuffer<int32_t>(buffer_ptr);
-                if (action == SAVE) {
-                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
-                }
-                return;
-            }
-            case BuiltinType::FLOAT32: {
-                auto tmp = ReadFromBuffer<float>(buffer_ptr);
-                if (action == SAVE) {
-                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
-                }
-                return;
-            }
-            case BuiltinType::FLOAT64: {
-                auto tmp = ReadFromBuffer<double>(buffer_ptr);
-                if (action == SAVE) {
-                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
-                }
-                return;
-            }
-            case BuiltinType::INT64:
-            case BuiltinType::UINT64:
-            {
-                auto tmp = ReadFromBuffer<int64_t>(buffer_ptr);
-                if (action == SAVE) {
-                    vector_out->first.insert(vector_out->first.end(), (char*)&tmp, (char*)&tmp+sizeof(tmp));
-                }
-                return;
-            }
-            case BuiltinType::TIME: { // 2 ints (secs/nanosecs)
-                // handle as a composite type, call recusrsively
-                auto secs = ReadFromBuffer<int32_t>(buffer_ptr);
-                auto nsecs = ReadFromBuffer<int32_t>(buffer_ptr);
-
-                if (action == SAVE){
-                    vector_out->first.insert(vector_out->first.end(), (char*)&secs, ((char*)&secs)+sizeof(secs));
-
-                    auto * vector_out2 = &tp.columns[*flat_pos];
-                    (*flat_pos) += (action == SAVE);
-                    vector_out2->first.insert(vector_out2->first.end(), (char*)&nsecs, ((char*)&nsecs)+sizeof(nsecs));
-                }
-                return;
-            }
-            case BuiltinType::STRING: {
-                auto len = ReadFromBuffer<uint32_t>(buffer_ptr);
-                auto begin = reinterpret_cast<char*>(&len);
-                if (action == SAVE) {
-                    // for now, push lengths to first vector
-                    // and push bytes to second vector.
-                    // pinters into an vector get invalidated upon reallocation, so
-                    // we defer getting all pointers until flush time
-                    // at flush time, make an array to
-                    vector_out->first.insert(vector_out->first.end(), begin, begin + sizeof(len));
-                    vector_out->second.insert(vector_out->second.end(), *buffer_ptr, (*buffer_ptr) + len);
-                }
-                (*buffer_ptr)+=len;
-                return;
-            }
-            default:
-                cout << "TODO: add handler for type: " << elemtype << endl;
-                assert(false);
-                return;
-        }
-    }
 
     void writeMsg(const rosbag::MessageInstance& msg){
 //            uint32_t topic_size = (uint32_t)msg.getTopic().size();
@@ -733,15 +738,14 @@ public:
                 RosIntrospection::ROSType rtype(msg.getDataType());
             }
 
-            auto &typeinfo = getInfo(msg);
-            addRow(msg, m_buffer.data(), m_buffer.data() + m_buffer.size(), typeinfo);
+        GetHandler(msg).addRow(msg, m_buffer.data(), m_buffer.data() + m_buffer.size());
             m_seqno++;
     }
 
     void Close() {
         for (auto &kv : m_pertype) {
-            if (kv.second.parquet_schema->field_count()) {
-                kv.second.Close();
+            if (kv.second.output_buf.parquet_schema->field_count()) {
+                kv.second.output_buf.Close();
             }
         }
 
@@ -760,21 +764,21 @@ public:
 private:
 
 
-    typeinfo& getInfo(const rosbag::MessageInstance &msg) {
+    MsgTable& GetHandler(const rosbag::MessageInstance &msg) {
         auto iter = m_pertype.find(msg.getDataType());
 
         // use parquet_schema as a proxy for ovrall initialization
         if (iter == m_pertype.end()) {
             // Create a ParquetFileWriter instance once
-            m_pertype.emplace(msg.getDataType(), typeinfo(msg.getDataType(),
+            m_pertype.emplace(msg.getDataType(), MsgTable(msg.getDataType(),
                                                            msg.getMD5Sum(),
                                                            m_dirname,
                                                            msg.getMessageDefinition()));
             iter = m_pertype.find(msg.getDataType());
 
             // emit create statement to load data easily
-            EmitCreateStatement(iter->second.clean_tp, iter->second.filename,
-                                *iter->second.parquet_schema, m_loadscript);
+            EmitCreateStatement(iter->second.clean_tp, iter->second.output_buf.filename,
+                                *iter->second.output_buf.parquet_schema, m_loadscript);
         }
 
         assert(msg.getMD5Sum() == iter->second.md5sum);
@@ -786,7 +790,7 @@ private:
     uint64_t m_seqno = 0;
     const string m_dirname;
     ofstream m_loadscript;
-    std::unordered_map<std::string, typeinfo> m_pertype;
+    std::unordered_map<std::string, MsgTable> m_pertype;
     TableBuffer m_streamtable;
     TableBuffer m_connectiontable;
 };
