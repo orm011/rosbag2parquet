@@ -513,7 +513,7 @@ class FlattenedRosWriter {
 
         MsgTable(const string& rostypename,
                  const string& md5sum,
-                 const string& name_prefix,
+                 const string& dirname,
                  const string& msgdefinition)
         : rostypename(rostypename),
           msgdefinition(msgdefinition),
@@ -564,7 +564,8 @@ class FlattenedRosWriter {
             }
 
             // file
-            output_buf.filename = name_prefix + clean_tp + ".parquet";
+            output_buf.filename.append(dirname).append("/").append(clean_tp).append(".parquet");
+
             // Create a local file output stream instance.
             using FileClass = ::arrow::io::FileOutputStream;
             PARQUET_THROW_NOT_OK(FileClass::Open(output_buf.filename, &output_buf.out_file));
@@ -702,8 +703,8 @@ public:
         m_loadscript << "CREATE SCHEMA IF NOT EXISTS :schema;" << endl;
         m_loadscript << "set search_path to :schema, public;" << endl << endl;
         m_loadscript << "-- using max var type lengths allowed by vertica before it truncates" << endl;
-        m_loadscript << "\\set :max_varchar 65000" << endl;
-        m_loadscript << "\\set :max_long_varbinary 32000000" << endl;
+        m_loadscript << "\\set max_varchar 65000" << endl;
+        m_loadscript << "\\set max_long_varbinary 32000000" << endl;
         m_loadscript << "--  need to pass -v fileseq=<file sequence> (create a sequence if needed)" << endl;
         m_loadscript << "\\set fileseq '\\'':fileseq'\\''" << endl;
         m_loadscript << "-- gets a unique sequence number and begins transaction" << endl;
