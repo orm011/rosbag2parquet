@@ -181,6 +181,9 @@ class FlattenedRosWriter {
 
             out << "  file_id INTEGER NOT NULL DEFAULT currval(:fileseq)" << endl;
 
+            string header_keyword = "header_stamp_nsec";
+            string message_keyword = "time_nsec";
+
             for (int i = 0; i < parquet_schema->field_count(); ++i){
                 auto &fld = parquet_schema->field(i);
                 out << ", ";
@@ -189,7 +192,23 @@ class FlattenedRosWriter {
                 assert(!fld->is_repeated());
                 out << GetVerticaType(
                         static_cast<parquet::schema::PrimitiveNode*>(fld.get())) << endl;
+
+                // any table with a header will also get a timestamp
+                if (memcmp(fld->name().data(), header_keyword.data(), header_keyword.size()) == 0){
+                    out << ", header_timestamp TIMESTAMPTZ NOT NULL default "
+                            "to_timestamp(header_stamp_sec + header_stamp_nsec*1e-9)";
+                    out << endl;
+                }
+
+                // message table timestamp
+                if (memcmp(fld->name().data(), message_keyword.data(), message_keyword.size()) == 0){
+                    out << ", timestamp TIMESTAMPTZ NOT NULL default "
+                            "to_timestamp(time_sec + time_nsec*1e-9)";
+                    out << endl;
+                }
             }
+
+
             out << ");" << endl << endl;
 
             // emit client statement to set a variable
