@@ -872,7 +872,7 @@ public:
         }
     }
 
-    int64_t RecordMessageMetadata(const rosbag::MessageInstance &msg){
+    void RecordMessageMetadata(const rosbag::MessageInstance &msg){
         // records connection metadata into the connection table if needed
         // records stream metadata into the streamtable
         InsertToBuffer(0, m_seqno, &m_streamtable);
@@ -887,8 +887,6 @@ public:
         assert(f->second.second->datatype.size());
         InsertToBuffer(3, f->second.second->id, &m_streamtable);
         m_streamtable.updateCountMaybeFlush();
-
-        return m_seqno++;
     }
 
     void RecordAllConnectionMetadata(){
@@ -904,8 +902,8 @@ public:
     }
 
     void RecordMessageData(const rosbag::MessageInstance &msg){
-            auto seqno = RecordMessageMetadata(msg);
-            auto buffer_len = sizeof(seqno) + msg.size();
+            RecordMessageMetadata(msg);
+            auto buffer_len = sizeof(m_seqno) + msg.size();
 
             m_buffer.clear();
             m_buffer.reserve(buffer_len);
@@ -923,6 +921,7 @@ public:
 
         GetHandler(msg).addRow(msg, m_buffer.data(),
                                m_buffer.data() + m_buffer.size());
+        m_seqno++;
     }
 
     void Close() {
