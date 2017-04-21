@@ -901,7 +901,7 @@ public:
         f->second.first = true;
 
         assert(f->second.second->datatype.size());
-        InsertToBuffer(3, f->second.second->id, &m_streamtable);
+        InsertToBuffer(4, f->second.second->id, &m_streamtable);
         m_streamtable.updateCountMaybeFlush();
     }
 
