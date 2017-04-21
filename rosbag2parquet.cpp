@@ -792,6 +792,12 @@ public:
             );
 
             parquet_fields.push_back(
+                    PrimitiveNode::Make("size", // from bagfile, not from header
+                                        parquet::Repetition::REQUIRED, parquet::Type::INT32,
+                                        parquet::LogicalType::UINT_32)
+            );
+
+            parquet_fields.push_back(
                     PrimitiveNode::Make("connection_id", // from bagfile, not from header
                                         parquet::Repetition::REQUIRED, parquet::Type::INT32,
                                         parquet::LogicalType::UINT_32)
@@ -840,6 +846,14 @@ public:
                                     parquet::LogicalType::UTF8)
         );
 
+
+        parquet_fields.push_back(
+                PrimitiveNode::Make("callerid", // from bagfile, not from header
+                                    parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
+                                    parquet::LogicalType::UTF8)
+        );
+
+
         m_connectiontable = TableBuffer(m_dirname, "Connections", parquet_fields);
         m_connectiontable.EmitCreateStatement(m_loadscript);
     }
@@ -878,6 +892,8 @@ public:
         InsertToBuffer(0, m_seqno, &m_streamtable);
         InsertToBuffer(1, msg.getTime().sec, &m_streamtable);
         InsertToBuffer(2, msg.getTime().nsec, &m_streamtable);
+        InsertToBuffer(3, msg.size(), &m_streamtable);
+
 
         // assuming we got all connections earlier
         auto f = m_conns_by_header.find(msg.getConnectionHeader().get());
@@ -897,6 +913,11 @@ public:
             InsertToBuffer(2, conn.datatype.size(), &m_connectiontable, conn.datatype.data());
             InsertToBuffer(3, conn.md5sum.size(), &m_connectiontable, conn.md5sum.data());
             InsertToBuffer(4, conn.msg_def.size(), &m_connectiontable, conn.msg_def.data());
+
+            auto cid = conn.header->find("callerid");
+            assert(cid != conn.header->end());
+            InsertToBuffer(5, cid->second.size(), &m_connectiontable, cid->second.data());
+
             m_connectiontable.updateCountMaybeFlush();
         }
     }
