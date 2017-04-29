@@ -38,6 +38,7 @@ DEFINE_string(bagfile, "", "path to input bagfile");
 //DEFINE_validator(bagfile, &validate_path);
 DEFINE_string(outdir, "", "path to the desired output location. An output folder will be created within.");
 //DEFINE_validator(outdir, &validate_path);
+DEFINE_int32(max_mbs, -1, "how much data (in MBs) to read before stopping, for testing");
 
 using namespace std;
 constexpr int NUM_ROWS_PER_ROW_GROUP = 1000;
@@ -1051,14 +1052,19 @@ int main(int argc, char **argv)
     }
 
     int64_t count = 0;
+    int64_t total_bytes = 0;
     FlattenedRosWriter outputs(FLAGS_bagfile, opath.native(), view.getConnections());
 
     for (const auto & msg : view) {
         outputs.RecordMessageData(msg);
         count+= 1;
+        total_bytes+= msg.size();
+        if (FLAGS_max_mbs > 0 && (total_bytes >> 20) >= FLAGS_max_mbs){
+            break;
+        }
     }
 
     outputs.Close();
-    fprintf(stderr, "Wrote %ld records to \n%s", count, opath.c_str());
+    fprintf(stderr, "Wrote %ld records (%ld MBs) to \n%s", count, (total_bytes >> 20), opath.c_str());
     //cout << count << endl;
 }
