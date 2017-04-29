@@ -971,7 +971,7 @@ public:
 
 
 
-        m_loadscript << "CREATE TABLE IF NOT EXISTS files (" << endl;
+        m_loadscript << "CREATE TABLE IF NOT EXISTS Files (" << endl;
         m_loadscript << "  file_id INTEGER PRIMARY KEY DEFAULT currval(:fileseq)" << endl;
         m_loadscript << ", file_load_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP" << endl;
         m_loadscript << ", file_path VARCHAR NOT NULL" << endl;
