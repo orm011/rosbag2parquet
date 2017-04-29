@@ -39,9 +39,9 @@ DEFINE_string(bagfile, "", "path to input bagfile");
 DEFINE_string(outdir, "", "path to the desired output location. An output folder will be created within.");
 //DEFINE_validator(outdir, &validate_path);
 DEFINE_int32(max_mbs, -1, "how much data (in MBs) to read before stopping, for testing");
+DEFINE_int32(rows_per_group, 4000, "max rows per parquet group");
 
 using namespace std;
-constexpr int NUM_ROWS_PER_ROW_GROUP = 1000;
 using parquet::Type;
 using parquet::LogicalType;
 using parquet::schema::PrimitiveNode;
@@ -334,7 +334,7 @@ class FlattenedRosWriter {
             total_rows += 1;
 
             // check for batch size
-            if (rows_since_last_reset == NUM_ROWS_PER_ROW_GROUP){
+            if (rows_since_last_reset == FLAGS_rows_per_group){
                 FlushBuffers();
             }
         }
