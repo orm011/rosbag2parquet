@@ -1035,6 +1035,7 @@ int main(int argc, char **argv)
     }
 
     outputs.Close();
-    fprintf(stderr, "Wrote %ld records (%ld MBs) to \n%s", count, (total_bytes >> 20), opath.c_str());
+    fprintf(stderr, "Wrote %ld ROS messages (%ld MB of ROS message blobs) to \n%s",
+            count, (total_bytes >> 20), opath.c_str());
     //cout << count << endl;
 }
