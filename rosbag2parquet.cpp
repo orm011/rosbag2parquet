@@ -152,7 +152,7 @@ class FlattenedRosWriter {
 
             // Add writer properties
             parquet::WriterProperties::Builder builder;
-            builder.compression(parquet::Compression::SNAPPY);
+            builder.compression(parquet::Compression::GZIP);
             std::shared_ptr<parquet::WriterProperties> props = builder.build();
 
             file_writer = parquet::ParquetFileWriter::Open(
@@ -797,11 +797,19 @@ public:
                                         parquet::LogicalType::UINT_32)
             );
 
+
             parquet_fields.push_back(
                     PrimitiveNode::Make("connection_id", // from bagfile, not from header
                                         parquet::Repetition::REQUIRED, parquet::Type::INT32,
                                         parquet::LogicalType::UINT_32)
             );
+
+            parquet_fields.push_back( // raw message.
+                    PrimitiveNode::Make("data", // from bagfile, not from header
+                                        parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
+                                        parquet::LogicalType::NONE)
+            );
+
 
             m_streamtable = TableBuffer(m_dirname, "Messages", parquet_fields);
             m_streamtable.EmitCreateStatement(m_loadscript);
@@ -902,6 +910,24 @@ public:
 
         assert(f->second.second->datatype.size());
         InsertToBuffer(4, f->second.second->id, &m_streamtable);
+
+        // prepare buffer to be store raw message bytes
+        {
+            auto buffer_len = sizeof(m_seqno) + msg.size();
+            m_buffer.clear();
+            m_buffer.reserve(buffer_len);
+            m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
+
+            assert(m_buffer.capacity() - m_buffer.size() >= msg.size());
+
+            auto pos = m_buffer.size();
+            m_buffer.resize(buffer_len);
+            uint8_t *buffer_raw = m_buffer.data() + pos;
+            ros::serialization::OStream stream(buffer_raw, msg.size());
+            msg.write(stream);
+            InsertToBuffer(5, msg.size(), &m_streamtable, (char*)buffer_raw);
+        }
+
         m_streamtable.updateCountMaybeFlush();
     }
 
@@ -924,25 +950,9 @@ public:
 
     void RecordMessageData(const rosbag::MessageInstance &msg){
             RecordMessageMetadata(msg);
-            auto buffer_len = sizeof(m_seqno) + msg.size();
-
-            m_buffer.clear();
-            m_buffer.reserve(buffer_len);
-            m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
-
-            assert(m_buffer.capacity() - m_buffer.size() >= msg.size());
-            {
-                auto pos = m_buffer.size();
-                m_buffer.resize(buffer_len);
-                uint8_t *buffer_raw = m_buffer.data() + pos;
-                ros::serialization::OStream stream(buffer_raw, msg.size());
-                msg.write(stream);
-                RosIntrospection::ROSType rtype(msg.getDataType());
-            }
-
-        GetHandler(msg).addRow(msg, m_buffer.data(),
-                               m_buffer.data() + m_buffer.size());
-        m_seqno++;
+            GetHandler(msg).addRow(msg, m_buffer.data(),
+                                   m_buffer.data() + m_buffer.size());
+            m_seqno++;
     }
 
     void Close() {
