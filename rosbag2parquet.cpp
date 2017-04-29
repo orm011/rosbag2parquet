@@ -153,7 +153,7 @@ class FlattenedRosWriter {
 
             // Add writer properties
             parquet::WriterProperties::Builder builder;
-            builder.compression(parquet::Compression::GZIP);
+            builder.compression(parquet::Compression::SNAPPY);
             std::shared_ptr<parquet::WriterProperties> props = builder.build();
 
             file_writer = parquet::ParquetFileWriter::Open(
