@@ -386,10 +386,11 @@ class FlattenedRosWriter {
 
                 // saving only byte buffers (uint8 arrays) right now.
                 if (f.type().isArray()) {
+                    // we skip all arrays (fixed len or not) for now (we can access the raw messages)
 
                     // handle uint8 vararray just like a string
                     if (f.type().typeID() == RosIntrospection::BuiltinType::UINT8 && f.type().arraySize() < 0) {
-                        handleBuiltin(flat_pos, recursion_depth+1, action,
+                        handleBuiltin(flat_pos, recursion_depth+1, SKIP_SCALAR,
                                       buffer, buffer_end, RosIntrospection::BuiltinType::STRING);
                         continue;
                     }
@@ -408,7 +409,7 @@ class FlattenedRosWriter {
                     // fixed len arrays of builtins (may save)
                     if (f.type().isBuiltin() && f.type().isArray() && f.type().arraySize() > 0) {
                         for (int i = 0; i < f.type().arraySize(); ++i) {
-                            handleBuiltin(flat_pos, recursion_depth +1, action,
+                            handleBuiltin(flat_pos, recursion_depth +1, SKIP_SCALAR,
                                           buffer, buffer_end, f.type().typeID());
                         }
                         continue;
@@ -598,39 +599,8 @@ class FlattenedRosWriter {
             for (auto &f: ros_msg_type.fields()){
                 if (f.isConstant()) continue; // enum values?
                 if (f.type().isArray()) {
-
-                    // uint8[] is not flattened (blobs)
-                    if (f.type().isBuiltin() &&
-                        f.type().typeID() == RosIntrospection::BuiltinType::UINT8) {
-                        parquet_fields->push_back(
-                                PrimitiveNode::Make(
-                                        name_prefix + f.name().toStdString(),
-                                        parquet::Repetition::REQUIRED,
-                                        Type::BYTE_ARRAY, LogicalType::NONE)
-                        );
-                    }
-
-                    // constant sized arrays of primitive types get a column for each index?
-                    // TODO: make this recursive to handle fixed length arrays of any type
-                    if (f.type().arraySize() > 0 && f.type().isBuiltin()){
-                        auto nm = f.name().toStdString();
-                        auto tp = to_parquet_type(f.type().typeID());
-                        for (int i = 0; i < f.type().arraySize(); ++i){
-                            parquet_fields->push_back(
-                                    PrimitiveNode::Make(
-                                            name_prefix + nm + '_' + std::to_string(i),
-                                            parquet::Repetition::REQUIRED,
-                                            tp,
-                                            LogicalType::NONE)
-                            );
-                        }
-                    } else if (f.type().arraySize() > 0){
-                        assert(false && "not handling fixed sized arrays of complex types at the moment");
-                    }
-
-                    continue;
+                    continue; // arrays are being skipped, handled at application level right now
                 }
-
 
                 // scalars
                 if (f.type().typeID() == RosIntrospection::BuiltinType::STRING ){
