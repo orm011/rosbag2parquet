@@ -107,12 +107,11 @@ template <typename T> T ReadFromBuffer(const uint8_t** buffer)
 class FlattenedRosWriter {
 
     enum Action {
-        SKIP, // used for now, to be able to load the parts of data we can parse
-        SKIP_SCALAR, // act like it is a scalar, even if it is an array (hack)
+        SKIP, // nested arrays show up on the blobs
         SAVE
     };
 
-    const char* action_string[SAVE+1] = {"SKIP", "SKIP_SCALAR", "SAVE"};
+    const char* action_string[SAVE+1] = {"SKIP", "SAVE"};
 
     struct TableBuffer {
         TableBuffer() = default;
@@ -387,46 +386,37 @@ class FlattenedRosWriter {
 
                 // arrays get skipped. SKIP_SCALAR means handle only the current scalar
                 // TODO: this can go away if we use our own type descriptions
-                if (f.type().isArray() && action != SKIP_SCALAR) {
-                    // we skip all arrays (fixed len or not) for now (we can access the raw messages)
-
+                if (f.type().isArray()) {
                     // handle uint8 vararray just like a string
                     if (f.type().typeID() == RosIntrospection::BuiltinType::UINT8 && f.type().arraySize() < 0) {
-                        handleBuiltin(flat_pos, recursion_depth+1, SKIP_SCALAR,
+                        handleBuiltin(flat_pos, recursion_depth+1, SKIP,
                                       buffer, buffer_end, RosIntrospection::BuiltinType::STRING);
                         continue;
                     }
 
 
                     // figure out how many things to skip
-                    auto rawlen = f.type().arraySize();
                     uint32_t len = 0;
-                    if (rawlen >= 0) { // constant array
-                        len = rawlen;
-                    } else if (rawlen == -1) { // variable length array
+                    if (f.type().arraySize() >= 0) { // constant array
+                        len = f.type().arraySize();
+                    } else { // variable length array
                         len = ReadFromBuffer<uint32_t>(buffer);
                     }
 
-
-                    // fixed len arrays of builtins (may save)
-                    if (f.type().isBuiltin() && f.type().isArray() && f.type().arraySize() > 0) {
-                        for (int i = 0; i < f.type().arraySize(); ++i) {
-                            handleBuiltin(flat_pos, recursion_depth +1, SKIP_SCALAR,
-                                          buffer, buffer_end, f.type().typeID());
-                        }
-                        continue;
-                    }
+                    // in principle, this is not necessarily a scalar, just an array of less dimensions
+                    auto array_elt_type = RemoveArray(f.type());
+                    assert(!array_elt_type.isArray()); // would need more code to handle array of arrays
 
                     // now skip them one by one
-                    for (uint32_t i = 0; i < len; ++i){
-                        // convert name to scalar (so it can be looked up)
-                        if (f.type().isBuiltin()){
-                            handleBuiltin(flat_pos, recursion_depth+1, SKIP_SCALAR, buffer,
-                                          buffer_end,f.type().typeID());
-                        } else {
-                            auto msg = GetMessage(f.type());
-                            handleMessage(flat_pos, recursion_depth + 1, SKIP_SCALAR, buffer, buffer_end,
-                                          msg);
+                    if (!array_elt_type.isBuiltin()) {
+                        auto msg = GetMessage(array_elt_type);
+                        for (uint32_t i = 0; i < len; ++i) {
+                            handleMessage(flat_pos, recursion_depth + 1, SKIP, buffer, buffer_end, msg);
+                        }
+                    } else {
+                        for (uint32_t i = 0; i < len; ++i) {
+                            handleBuiltin(flat_pos, recursion_depth + 1, SKIP, buffer, buffer_end,
+                                          f.type().typeID());
                         }
                     }
 
@@ -685,18 +675,44 @@ class FlattenedRosWriter {
 
         TableBuffer output_buf;
 
+        // removes one level of array type
+        static RosIntrospection::ROSType RemoveArray(const RosIntrospection::ROSType &tp){
+            if (tp.isArray()) {
+                // typename has [] at the end.
+                string no_brackets = tp.baseName().toStdString();
+                assert(no_brackets.back() == ']');
+                no_brackets.pop_back();
+
+                if (tp.arraySize() >= 0) {
+                    // fixed len fields have numbers as well
+                    // eg [9] or [36]
+                    string sizstring = to_string(tp.arraySize());
+                    assert(no_brackets.size() > sizstring.size());
+                    auto pos = no_brackets.size() - sizstring.size();
+                    auto strend = no_brackets.substr(pos, sizstring.size());
+                    assert (sizstring == strend);
+                    no_brackets.erase(pos, sizstring.size());
+                }
+
+                assert(no_brackets.back() == '[');
+                no_brackets.pop_back();
+
+                return RosIntrospection::ROSType(no_brackets);
+            }
+
+            return tp;
+        }
+
+
         const RosIntrospection::ROSMessage* GetMessage(
                 const RosIntrospection::ROSType& tp) const {
-            // TODO(orm) handle nested complex types
+
             auto basename_equals = [&] (const auto& msg) {
-                if (!tp.isArray()) {
-                    return msg.type() == tp;
+                RosIntrospection::ROSType scalar = msg.type();
+                while (scalar.isArray()){
+                    scalar = RemoveArray(msg.type());
                 }
-                else {
-                    // typename has [] at the end.
-                    auto cmp = memcmp(msg.type().baseName().data(), tp.baseName().data(), tp.baseName().size() - 2);
-                    return cmp == 0;
-                }
+                return scalar == tp;
             };
 
             auto it = std::find_if(type_list.begin(),
@@ -705,6 +721,7 @@ class FlattenedRosWriter {
             assert(it != type_list.end());
             return &(*it);
         }
+
     };
 
 
