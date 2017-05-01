@@ -180,7 +180,8 @@ class FlattenedRosWriter {
             out << "CREATE TABLE IF NOT EXISTS "
                 << tablename << " (" << endl;
 
-            out << "  file_id INTEGER NOT NULL DEFAULT currval(:fileseq)" << endl;
+            out << "  ID AUTO_INCREMENT PRIMARY KEY -- redundant, but helps load data substantially faster" << endl;
+            out << ", file_id INTEGER NOT NULL DEFAULT currval(:fileseq)" << endl;
 
             string header_keyword = "header_stamp_nsec";
             string message_keyword = "time_nsec";
@@ -944,7 +945,7 @@ public:
         m_loadscript << "CREATE TABLE IF NOT EXISTS Files (" << endl;
         m_loadscript << "  file_id INTEGER PRIMARY KEY DEFAULT currval(:fileseq)" << endl;
         m_loadscript << ", file_load_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP" << endl;
-        m_loadscript << ", file_path VARCHAR NOT NULL" << endl;
+        m_loadscript << ", file_path VARCHAR(:max_varchar) NOT NULL" << endl;
         m_loadscript << ");" << endl << endl;
         m_loadscript << "INSERT INTO files (file_path) VALUES ( '" << m_bagname << "' );" << endl << endl;
 
