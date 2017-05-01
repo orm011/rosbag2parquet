@@ -519,7 +519,10 @@ class FlattenedRosWriter {
                     }
                     return;
                 }
-                case BuiltinType::TIME: { // 2 ints (secs/nanosecs)
+                case BuiltinType::TIME:
+                case BuiltinType::DURATION:
+                {   // TODO duration is pair of uint32...
+                    // 2 ints (secs/nanosecs)
                     // handle as a composite type, call recusrsively
                     auto secs = ReadFromBuffer<int32_t>(buffer_ptr);
                     auto nsecs = ReadFromBuffer<int32_t>(buffer_ptr);
@@ -608,7 +611,8 @@ class FlattenedRosWriter {
                     parquet_fields->push_back(PrimitiveNode::Make(
                             name_prefix + f.name().toStdString(), parquet::Repetition::REQUIRED,
                             Type::BYTE_ARRAY, LogicalType::UTF8));
-                }  else if (f.type().typeID() == RosIntrospection::TIME){
+                }  else if (f.type().typeID() == RosIntrospection::TIME
+                            || f.type().typeID() == RosIntrospection::DURATION){
                     parquet_fields->push_back(PrimitiveNode::Make(
                             name_prefix + f.name().toStdString() + "_sec", parquet::Repetition::REQUIRED,
                             Type::INT32, LogicalType::NONE));
