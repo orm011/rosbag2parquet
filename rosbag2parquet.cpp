@@ -385,8 +385,9 @@ class FlattenedRosWriter {
 
                 if (f.isConstant()) continue;
 
-                // saving only byte buffers (uint8 arrays) right now.
-                if (f.type().isArray()) {
+                // arrays get skipped. SKIP_SCALAR means handle only the current scalar
+                // TODO: this can go away if we use our own type descriptions
+                if (f.type().isArray() && action != SKIP_SCALAR) {
                     // we skip all arrays (fixed len or not) for now (we can access the raw messages)
 
                     // handle uint8 vararray just like a string
