@@ -1058,7 +1058,7 @@ int main(int argc, char **argv)
     }
 
     outputs.Close();
-    fprintf(stderr, "Wrote %ld ROS messages (%ld MB of ROS message blobs) to \n%s",
+    fprintf(stderr, "Wrote %ld ROS messages (%ld MB of ROS message blobs) to \n%s\n",
             count, (total_bytes >> 20), opath.c_str());
     //cout << count << endl;
 }
