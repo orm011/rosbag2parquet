@@ -1,10 +1,37 @@
 cmake_minimum_required(VERSION 3.5)
-
 #force outside build (avoid polluting folder)
 set(CMAKE_DISABLE_SOURCE_CHANGES ON)
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 set(CMAKE_CXX_STANDARD 14)
 
+# next few lines taken from: https://github.com/google/googletest/blob/master/googletest/README.md
+# import cmake
+configure_file(CMakeLists.txt.in googletest-download/CMakeLists.txt)
+
+# Download and unpack googletest at configure time
+configure_file(CMakeLists.txt.in googletest-download/CMakeLists.txt)
+execute_process(COMMAND ${CMAKE_COMMAND} -G "${CMAKE_GENERATOR}" .
+        RESULT_VARIABLE result
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/googletest-download )
+if(result)
+    message(FATAL_ERROR "CMake step for googletest failed: ${result}")
+endif()
+execute_process(COMMAND ${CMAKE_COMMAND} --build .
+        RESULT_VARIABLE result
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/googletest-download )
+if(result)
+    message(FATAL_ERROR "Build step for googletest failed: ${result}")
+endif()
+
+# Prevent overriding the parent project's compiler/linker
+# settings on Windows
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+
+# Add googletest directly to our build. This defines
+# the gtest and gtest_main targets.
+add_subdirectory(${CMAKE_BINARY_DIR}/googletest-src
+        ${CMAKE_BINARY_DIR}/googletest-build)
+# end of https://github.com/google/googletest/blob/master/googletest/README.md
 
 project(rosbag2parquet)
 # remember to source the ros env for this to find the ros symbols
@@ -60,17 +87,30 @@ target_link_libraries(rosbag_example.bin
         )
 
 set(parquet_LIBRARIES parquet arrow arrow_io)
-add_executable(parquet_example.bin parquet_example.cpp types.h)
+add_executable(parquet_example.bin parquet_example.cpp utils.h)
 
 #if asan debugging, link to asan as well
 target_link_libraries(parquet_example.bin
         ${parquet_LIBRARIES}
         )
 
-add_executable(rosbag2parquet.bin rosbag2parquet.cpp)
+add_executable(rosbag2parquet.bin rosbag2parquet.cpp
+        FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp MessageTable.h TableBuffer.cpp TableBuffer.h)
 target_link_libraries(rosbag2parquet.bin
         gflags
         ${rosbag_LIBRARIES}
         ${parquet_LIBRARIES}
         ${ros_type_introspection_LIBRARIES}
         )
+
+add_executable(rosbag2parquet_test
+        rosbag2parquet_test.cpp FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp MessageTable.h
+        TableBuffer.cpp TableBuffer.h)
+
+target_link_libraries(rosbag2parquet_test gtest_main
+        gflags
+        ${rosbag_LIBRARIES}
+        ${parquet_LIBRARIES}
+        ${ros_type_introspection_LIBRARIES}
+        )
+add_test(NAME all_tests COMMAND rosbag2parquet_test)

@@ -2,6 +2,9 @@
 #define ROSBAG2PARQUET_TYPES_H
 
 #include <parquet/types.h>
+#include <parquet/schema.h>
+#include <iostream>
+#include <cassert>
 
 // TODO: remove dependence on ros_type_introspection
 // only really need
@@ -92,5 +95,45 @@
         // strings, byte arrays and timestamps handled manually
     }
 */
+
+inline const char* GetVerticaType(const parquet::schema::PrimitiveNode* nd)
+{
+
+    switch(nd->physical_type()) {
+        case parquet::Type::INT32:
+        case parquet::Type::INT64:
+            // all integer types map to INTEGER,
+            // a vertica signed 64 bit integer (with no -2^63+1)
+            // if your data has UINT64 in the large range,
+            // Also, -2^63+1 is not going to be be handled correctly.
+            return "INTEGER";
+        case parquet::Type::BOOLEAN:
+            return "BOOLEAN";
+        case parquet::Type::BYTE_ARRAY:
+            switch (nd->logical_type()){
+                case parquet::LogicalType::UTF8:
+                    return "VARCHAR(:max_varchar)";
+                case parquet::LogicalType::NONE:
+                    return "LONG VARBINARY(:max_long_varbinary)";
+                default:
+                    std::cerr << "warning: unknown byte array combo";
+                    parquet::schema::PrintSchema(nd, std::cerr);
+                    return "LONG VARBINARY(:max_long_varbinary)";
+            }
+        case parquet::Type::FLOAT:
+            return "FLOAT";
+        case parquet::Type::DOUBLE:
+            return "DOUBLE PRECISION";
+        default:
+        std::cerr << "ERROR: no vertica type found for this parquet type"  << std::endl;
+            parquet::schema::PrintSchema(nd, std::cerr);
+        std::cerr.flush();
+            assert(false);
+    }
+
+    assert(false);
+    return 0;
+}
+
 
 #endif //ROSBAG2PARQUET_TYPES_H
