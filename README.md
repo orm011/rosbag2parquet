@@ -2,6 +2,17 @@
 Rosbag2parquet transforms ROS .`bag` files into 
 query friendlier `.parquet` files
 
+Why parquet?  Parquet is a chunked-columnar format.  Chunked means a group of rows get placed together, columnar that the fields of those rows get stored in a columnar way. Each chunk then has statistics on each column (min,max,count,count nulls). 
+Rosbag only keeps statistics on a few select things (timestamp, count by connection).  By keeping such statistics we can skip full blocks based on any column predicate (eg, gps location bounding box).   In principle, the fields in the same columns are more compressible placed together than as rows. (we haven't verified this).
+
+Parquet has support for accessing small parts of large parquet files (or collections of files) without having to pay a large penalty in reading lots of the file or an initialization penalty to gather lots of metadata. Rosbag takes a long time to initialize itself, apparently reading metadata at multiple locations. (TODO, show plots). 
+
+Multiple tools support parquet: eg. pyarrow loads parquet into arrow and pandas, and one can first pick a chunk to load. Spark, Impala and Drill all allow one to query parquet files.   Some databases include foreign data wrapper for parquet files (eg, Vertica). In principle, postgres could have one implemented as well. This allows one to query with SQL without going through an extra load phase.   Parquet allows taking multiple parquet files' metadata and merging it. This can help go from multiple single trip files to a virtual multi-trip file without requiring physically merging them.
+
+Parquet also allows transparent flattening of datatypes. We are not using this component at the moment and it is unclear this is supported by most parquet reading tools, but with enough support on the read side, this may be a good way to handle the nesting inherent of rosmsg types. 
+
+We are still learning whether these things are a big advantage in practice (or whether the tooling works).
+
 Example:
 
 ```bash
@@ -90,7 +101,7 @@ total 41M
 * It handles byte arrays (eg, in Compressed_Image)
 * It handles fixed sized arrays of any primitive type
 
-##Output description:
+## Output description:
 A bagfile contains message data as well as bag metadata.
 As shown above, we create two metadata tables (Messages and Connections)
 to hold bag metadata.
@@ -113,13 +124,10 @@ Vertica database tables, including:
  * uniquely identify records from multiple trips loaded
  onto the same database
 
-##Current handling of nested types:
+## Current handling of nested types:
+* rosbag2parquet converts all rosmsg primitive types to parquet versions, including strings.
 * rosbag2parquet flattens nested structs (eg Headers)
-* rosbag2parquet currently skips fields of type variable sized arrays 
-of complex types. (eg laserscan, velodyne packet and TF)
-* rosbag2parquet skips fields of type fixed sized arrays of non-primitive types.
-(eg some types are using int32[] for opaque data, 
-not uint8[], and so that blob is being skipped)
+* rosbag2parquet skips array types of any kind (they get preserved as a blob, but are not flattened/queriable at the moment)
 
 Handling all of those is well within our reach, but
 such data is not being used by our current queries. 
@@ -129,11 +137,11 @@ the result from the `.bag` looks just like the result
 from the `.parquet` data.
 
 ## Testing: 
-Currently we test this on some bagfiles we have, and run
+We could use a small test to verify we handle different ros types well.
+
+Currently we test this end to end on some bagfiles we have, and run
 queries on those files that we know have certain results.
-We are getting to the point where a few sanity checks 
-would save time.
- 
+
 ## Performance:
 Given enough IO bandwidth, the current implementation
 bottlenecks on a single CPU consuming a non-compressed
@@ -144,13 +152,32 @@ any tuning on the parquet side in terms of customizing
 encoding.
 
 ## Dependencies:
-Implicit dependencies on:
-* Boost Filesystem
-* Google flags (does not come with cmake)
-* parquet-cpp 1.0 (including indirect one on Arrow, neither
-of which uses cmake)
-* Our version of ros is kinetic.
+TODO: Would love to clean this up to make it easy to build.
 
-See CMakefile for explicit ones.
-We have a dependency on ros_instrospection msg parsing and type descriptions which we should make go away
-also for both ease of installation and performance reasons.
+### GoogleTest: 
+cmake should download the repo and handle this without extra inolvement.
+
+### Packages with Find*.cmake:
+See CMakefile.  These will get found by cmake or reported 
+at config time as failures. Ros kinetic is found this way.
+
+### Packages without a Find*.cmake:
+Lack of them will simply show up  as compile/link errors.
+* Boost Filesystem (there must be a cmake for this, right?)
+* Google flags 
+* parquet-cpp 1.0 and apache arrow (you probably want to build this one 
+  from srouce. Arrow gets downloaded and built for it)
+o satisfy them you need to make sure they are in well known paths
+or the right files show up in in CPLUS_INCLUDE_PATH, LIBRARY_PATH, LD_LIBRARY_PATH.
+
+### Non-packaged software:
+We have a dependency on ros_instrospection msg parsing and type descriptions.
+
+To remove, we can write a tool to convert ros message definitions (text) into a C struct description. We should be able to go from that C struct to a parquet Schema object,  and we should be able to use that C struct to direct the parsing of a message.
+
+Forked version available at: https://github.com/orm011/ros_type_introspection
+
+To satisfy this one we need to download the git repo, build it and provide something like the following:
+
+### Configuring build:
+ ```cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH=/home/orm/ros_type_introspection/build/devel/share/ros_type_introspection/cmake/ ..```
