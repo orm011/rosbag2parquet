@@ -7,7 +7,9 @@ Rosbag only keeps statistics on a few select things (timestamp, count by connect
 
 Parquet has support for accessing small parts of large parquet files (or collections of files) without having to pay a large penalty in reading lots of the file or an initialization penalty to gather lots of metadata. Rosbag takes a long time to initialize itself, apparently reading metadata at multiple locations. (TODO, show plots). 
 
-Multiple tools support parquet: eg. pyarrow loads parquet into arrow and pandas, and one can first pick a chunk to load. Spark, Impala and Drill all allow one to query parquet files.   Some databases include foreign data wrapper for parquet files (eg, Vertica). In principle, postgres could have one implemented as well. This allows one to query with SQL without going through an extra load phase.   Parquet allows taking multiple parquet files' metadata and merging it. This can help go from multiple single trip files to a virtual multi-trip file without requiring physically merging them.
+Multiple tools support parquet: eg. pyarrow loads parquet into arrow and pandas, and one can first pick a chunk to load. Spark, Impala and Drill all allow one to query parquet files.   Some databases include foreign data wrapper for parquet files (eg, Vertica). In principle, postgres could have one implemented as well. This allows one to query with SQL without going through an extra load phase.   
+
+Parquet allows taking multiple parquet files' metadata and merging it. This can help go from multiple single trip files to a virtual multi-trip file without requiring physically merging them.
 
 Parquet also allows transparent flattening of datatypes. We are not using this component at the moment and it is unclear this is supported by most parquet reading tools, but with enough support on the read side, this may be a good way to handle the nesting inherent of rosmsg types. 
 
