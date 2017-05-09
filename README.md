@@ -3,11 +3,7 @@ Rosbag2parquet transforms ROS .`bag` files into  query friendlier `.parquet` fil
 
 Why parquet?  
 
-Parquet is a chunked-columnar format.  Chunked means a group of rows get placed together, columnar that the fields of those rows get stored in a columnar way. Each chunk has statistics on each column (min,max,count,count nulls) that allow one to decide whether a chunk has data of interest.
-
-Rosbag does something similar but only on a few select fields (timestamp, connection).  By keeping such statistics we can skip full blocks based on any column predicate (eg, gps location bounding box).   
-
-By making data columnar, it is possible to access a subset of the fields in eg. a CompressedImage format before deciding whether to incur I/O for the image blob itself. This is useful to decide if we should read the large blobs at all.
+Parquet is a chunked-columnar format.  Chunked means a group of rows get placed together, columnar that the fields of those rows get stored in a columnar way. Each chunk has statistics on each column (min,max,count,count nulls) that allow one to decide whether a chunk has data of interest. Rosbag does something similar but only on a few select fields (timestamp, connection).  By making data columnar, it is possible to access a subset of the fields in a CompressedImage (eg, the header and frame_id) before deciding whether to incur I/O for the image blob itself. This is useful especially in bandwidth constrained data access (eg accessing csail NFS through 1Gbit ethernet).
 
 Like in rosbag, whole chunks then get compressed. Parquet supports a lot more chunk compression formats in the compute-size tradeoff spectrum than rosbag. (Eg. SNAPPY, LZO, GZIP).  In principle, the fields in the same columns are more compressible placed together than as rows, though we dont' know if this is a big deal in our case.  Additionally Parquet supports per-column encoding schemes like Dictionary, run length and delta. These are there also to allow potentially faster querying.
 
