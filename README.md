@@ -1,19 +1,25 @@
 # rosbag2parquet
-Rosbag2parquet transforms ROS .`bag` files into 
-query friendlier `.parquet` files
+Rosbag2parquet transforms ROS .`bag` files into  query friendlier `.parquet` files
 
-Why parquet?  Parquet is a chunked-columnar format.  Chunked means a group of rows get placed together, columnar that the fields of those rows get stored in a columnar way. Each chunk then has statistics on each column (min,max,count,count nulls). 
-Rosbag only keeps statistics on a few select things (timestamp, count by connection).  By keeping such statistics we can skip full blocks based on any column predicate (eg, gps location bounding box).   By making the chunks large enough, it is possible to access fields in eg. a CompressedImage format before deciding whether to look at the image blob itself.  Like in rosbag, whole chunks then get compressed. Parquet supports a lot more chunk compression formats in the compute-size tradeoff spectrum than rosbag. (Eg. SNAPPY, LZO, GZIP).  In principle, the fields in the same columns are more compressible placed together than as rows, though we dont' know if this is a big deal in our case.  Additionally Parquet supports per-column encoding schemes like Dictionary, run length and delta. These are there also to allow potentially faster querying.
+Why parquet?  
+
+Parquet is a chunked-columnar format.  Chunked means a group of rows get placed together, columnar that the fields of those rows get stored in a columnar way. Each chunk has statistics on each column (min,max,count,count nulls) that allow one to decide whether a chunk has data of interest.
+
+Rosbag does something similar but only on a few select fields (timestamp, connection).  By keeping such statistics we can skip full blocks based on any column predicate (eg, gps location bounding box).   
+
+By making data columnar, it is possible to access a subset of the fields in eg. a CompressedImage format before deciding whether to incur I/O for the image blob itself. This is useful to decide if we should read the large blobs at all.
+
+Like in rosbag, whole chunks then get compressed. Parquet supports a lot more chunk compression formats in the compute-size tradeoff spectrum than rosbag. (Eg. SNAPPY, LZO, GZIP).  In principle, the fields in the same columns are more compressible placed together than as rows, though we dont' know if this is a big deal in our case.  Additionally Parquet supports per-column encoding schemes like Dictionary, run length and delta. These are there also to allow potentially faster querying.
 
 Parquet has support for accessing small parts of large parquet files (or collections of files) without having to pay a large penalty in reading lots of the file or an initialization penalty to gather lots of metadata. Rosbag takes a long time to initialize itself, apparently reading metadata at multiple locations. (TODO, show plots). 
 
-Multiple tools support parquet: eg. pyarrow loads parquet into arrow and pandas, and one can first pick a chunk to load. Spark, Impala and Drill all allow one to query parquet files.   Some databases include foreign data wrapper for parquet files (eg, Vertica). In principle, postgres could have one implemented as well. This allows one to query with SQL without going through an extra load phase.   
+Multiple tools support parquet: eg. pyarrow loads parquet into arrow and pandas, and one can first pick which chunk of a large to load. Spark, Impala and Drill all allow one to query parquet files.   Some databases include foreign data wrapper for parquet files (eg, Vertica). In principle, postgres could have one implemented as well. This allows one to query with SQL without going through an extra load phase.   
 
 Parquet allows taking multiple parquet files' metadata and merging it. This can help go from multiple single trip files to a virtual multi-trip file without requiring physically merging them.
 
 Parquet also allows transparent flattening of datatypes. We are not using this component at the moment and it is unclear this is supported by most parquet reading tools, but with enough support on the read side, this may be a good way to handle the nesting inherent of rosmsg types. 
 
-We are still learning whether these things are a big advantage in practice (or whether the tooling works).
+We are still learning whether these things are a big advantage in practice (or whether the tooling works). We may decide an alternative format is better.
 
 Example:
 
