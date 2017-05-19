@@ -9,9 +9,11 @@ using namespace std;
 
 TableBuffer::TableBuffer(const string& dirname, const string & tablename,
                          int buffer_rows,
-                        const parquet::schema::NodeVector& fields) :
+                        const parquet::schema::NodeVector& fields,
+                        bool verbose) :
             tablename(tablename),
-            buffer_rows(buffer_rows)
+            buffer_rows(buffer_rows),
+            m_verbose(verbose)
     {
 
         // file
@@ -31,9 +33,11 @@ TableBuffer::TableBuffer(const string& dirname, const string & tablename,
                                                  parquet::Repetition::REQUIRED,
                                                  fields));
 
-        cerr << "******* Parquet schema: " << endl;
-        parquet::schema::PrintSchema(parquet_schema.get(), cerr);
-        cerr << "***********************" << endl;
+        if (verbose) {
+            cerr << "******* Parquet schema: " << endl;
+            parquet::schema::PrintSchema(parquet_schema.get(), cerr);
+            cerr << "***********************" << endl;
+        }
 
         if (parquet_schema->field_count() == 0) {
             cerr << "NOTE: current generated schema is empty... skipping this type" << endl;

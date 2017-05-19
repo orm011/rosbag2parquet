@@ -2,6 +2,8 @@
 #define ROSBAG2PARQUET_FLATTENEDROSWRITER_H
 
 #include <string>
+#include <fstream>
+
 #include "MessageTable.h"
 #include "TableBuffer.h"
 
@@ -9,7 +11,8 @@ class FlattenedRosWriter {
 
 public:
     FlattenedRosWriter(const rosbag::Bag&,
-                       const std::string& outputpath);
+                       const std::string& outputpath,
+                       bool verbose);
 
     void WriteMessage(const rosbag::MessageInstance &);
     void Close();
@@ -20,6 +23,7 @@ private:
     void InitLoadScript();
 
     MessageTable& GetHandler(const rosbag::MessageInstance &msg);
+    int getConnectionId(const rosbag::MessageInstance& msg) const;
     void RecordMessageMetadata(const rosbag::MessageInstance &msg);
     void RecordAllConnectionMetadata();
 
@@ -33,6 +37,7 @@ private:
     std::unordered_map<std::string, MessageTable> m_pertype;
     TableBuffer m_streamtable;
     TableBuffer m_connectiontable;
+    bool m_verbose;
 };
 
 

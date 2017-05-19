@@ -94,8 +94,9 @@ target_link_libraries(parquet_example.bin
         ${parquet_LIBRARIES}
         )
 
-add_executable(rosbag2parquet.bin rosbag2parquet.cpp
-        FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp MessageTable.h TableBuffer.cpp TableBuffer.h)
+add_executable(rosbag2parquet.bin
+        FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp
+        MessageTable.h TableBuffer.cpp TableBuffer.h rosbag2parquet.cpp rosbag2parquet.h main.cpp)
 target_link_libraries(rosbag2parquet.bin
         gflags
         ${rosbag_LIBRARIES}
@@ -105,7 +106,7 @@ target_link_libraries(rosbag2parquet.bin
 
 add_executable(rosbag2parquet_test
         rosbag2parquet_test.cpp FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp MessageTable.h
-        TableBuffer.cpp TableBuffer.h)
+        TableBuffer.cpp TableBuffer.h rosbag2parquet.cpp rosbag2parquet.h)
 
 target_link_libraries(rosbag2parquet_test gtest_main
         gflags

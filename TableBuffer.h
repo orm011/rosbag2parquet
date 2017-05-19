@@ -18,7 +18,7 @@ public:
 
         explicit TableBuffer(const std::string& dirname, const std::string & tablename,
                     int buffer_rows,
-                    const parquet::schema::NodeVector& fields) ;
+                    const parquet::schema::NodeVector& fields, bool verbose) ;
 
         std::string tablename;
         std::string filename;
@@ -29,6 +29,7 @@ public:
         int buffer_rows;
         int total_rows = 0;
         int rows_since_last_reset = 0;
+        bool m_verbose = false;
 
         using column_buffer_t = std::pair<std::vector<char>, std::vector<char>>;
         std::vector<column_buffer_t> columns;

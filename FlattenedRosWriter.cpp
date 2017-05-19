@@ -24,9 +24,10 @@ using parquet::schema::GroupNode;
 
 
     FlattenedRosWriter::FlattenedRosWriter(const rosbag::Bag& bag,
-                       const string& dirname)
+                       const string& dirname, bool verbose)
             : m_bagname(bag.getFileName()), m_dirname(dirname),
-              m_loadscript(dirname + "/vertica_load_tables.sql")
+              m_loadscript(dirname + "/vertica_load_tables.sql"),
+              m_verbose(verbose)
     {
 
         rosbag::View v;
@@ -98,14 +99,7 @@ using parquet::schema::GroupNode;
                                     parquet::LogicalType::UINT_32)
         );
 
-        parquet_fields.push_back( // raw message.
-                PrimitiveNode::Make("data", // from bagfile, not from header
-                                    parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
-                                    parquet::LogicalType::NONE)
-        );
-
-
-        m_streamtable = TableBuffer(m_dirname, "Messages", FLAGS_rows_per_group, parquet_fields);
+        m_streamtable = TableBuffer(m_dirname, "Messages", FLAGS_rows_per_group, parquet_fields, m_verbose);
         m_streamtable.EmitCreateStatement(m_loadscript);
     }
 
@@ -156,87 +150,90 @@ using parquet::schema::GroupNode;
         );
 
 
-        m_connectiontable = TableBuffer(m_dirname, "Connections", FLAGS_rows_per_group, parquet_fields);
+        m_connectiontable = TableBuffer(m_dirname, "Connections", FLAGS_rows_per_group, parquet_fields, m_verbose);
         m_connectiontable.EmitCreateStatement(m_loadscript);
     }
 
     // only works for simple types
+    void InsertData(int bufno, size_t len, const char* data, TableBuffer* buf){
+        assert(data);
+        assert(len < (1UL<<31)); // for things coming out as strings
+        auto len32 = (uint32_t) len;
+
+        // check the widened version is the same
+        assert(len32 == len);
+
+        auto & vec = buf->columns[bufno].first;
+        vec.insert(vec.end(),
+                   (const char*)&len32,
+                   (const char*)&len32 + sizeof(len32)
+        );
+
+        // then, val is assumed to be a length
+        auto &datavec = buf->columns[bufno].second;
+        datavec.insert(datavec.end(), data, data + len);
+    }
+
     template <typename T>
-    void InsertToBuffer(int bufno, T val, TableBuffer* buf, const char* data = nullptr){
-        static_assert(sizeof(T) == 4 || sizeof(T) == 8, "only for int32 or int64 types");
+    void InsertScalar(int bufno, T val, TableBuffer* buf){
+        // assert this is a struct of some kind at most?
+        static_assert(sizeof(T) == 4 || sizeof(T) == 8, "make sure this works for more complex types before removing");
+        auto & vec = buf->columns[bufno].first;
+        vec.insert(vec.end(),
+                   (const char*)&val,
+                   (const char*)&val + sizeof(T)
+        );
+    }
 
-        if (data){
-            // TODO, widen the other code to use 64 bit lengths?
-            assert(val < (1UL<<31)); // for things coming out as strings
-            auto len = (uint32_t) val;
-
-            auto & vec = buf->columns[bufno].first;
-            vec.insert(vec.end(),
-                       (const char*)&len,
-                       (const char*)&len + sizeof(len)
-            );
-
-            // then, val is assumed to be a length
-            auto &datavec = buf->columns[bufno].second;
-            datavec.insert(datavec.end(), data, data + val);
-        } else {
-            auto & vec = buf->columns[bufno].first;
-            vec.insert(vec.end(),
-                       (const char*)&val,
-                       (const char*)&val + sizeof(T)
-            );
-        }
+    int FlattenedRosWriter::getConnectionId(const rosbag::MessageInstance& msg) const {
+        auto f = m_conns_by_header.find(msg.getConnectionHeader().get());
+        assert (f!=m_conns_by_header.end());
+        // assert(f->second.second->datatype.size());
+        // TODO: at test time, figure out some way of making a valid header
+        return f->second.second->id;
     }
 
     void FlattenedRosWriter::RecordMessageMetadata(const rosbag::MessageInstance &msg){
         // records connection metadata into the connection table if needed
         // records stream metadata into the streamtable
-        InsertToBuffer(0, m_seqno, &m_streamtable);
-        InsertToBuffer(1, msg.getTime().sec, &m_streamtable);
-        InsertToBuffer(2, msg.getTime().nsec, &m_streamtable);
-        InsertToBuffer(3, msg.size(), &m_streamtable);
+        // TODO: we should add a file ID to all entries.
+        // but which kind of ID should we use?
+        // options:
+        // UUID: long string. will cause issues with any database not using dictionary encoding, hard to use for humans.
+        // on the other hand, parquet will be okay with it. and one can always choose not to load it into a db, using
+        // a local id scheme for that if one wishes. So the main argument then is just whether a human readable one is
+        // better.
+        //
+        // timestamp start  timestamp end: has some use.
+        // path/filename? filenames can be different (eg for the same file). it would be helpful if humans can reason
+        // about it
 
+        InsertScalar(0, m_seqno, &m_streamtable);
 
-        // assuming we got all connections earlier
-        auto f = m_conns_by_header.find(msg.getConnectionHeader().get());
-        assert (f!=m_conns_by_header.end());
-        f->second.first = true;
+        // TODO: should probably store ros timestamp as one parquet int96 column
+        // also means we should modify the ros::time parser to do the same.
+        // TODO: we should also probably store the bag timestamp in the per-type table itself
+        // as sometimes messages either have no timestamp, or their stamp is not well set.
 
-        assert(f->second.second->datatype.size());
-        InsertToBuffer(4, f->second.second->id, &m_streamtable);
-
-        // prepare buffer to be store raw message bytes
-        {
-            auto buffer_len = sizeof(m_seqno) + msg.size();
-            m_buffer.clear();
-            m_buffer.reserve(buffer_len);
-            m_buffer.insert(m_buffer.end(), (uint8_t*)&m_seqno, (uint8_t*)&m_seqno + sizeof(m_seqno));
-
-            assert(m_buffer.capacity() - m_buffer.size() >= msg.size());
-
-            auto pos = m_buffer.size();
-            m_buffer.resize(buffer_len);
-            uint8_t *buffer_raw = m_buffer.data() + pos;
-            ros::serialization::OStream stream(buffer_raw, msg.size());
-            msg.write(stream);
-            InsertToBuffer(5, msg.size(), &m_streamtable, (char*)buffer_raw);
-        }
-
+        InsertScalar(1, msg.getTime().sec, &m_streamtable);
+        InsertScalar(2, msg.getTime().nsec, &m_streamtable);
+        InsertScalar(3, msg.size(), &m_streamtable);
+        InsertScalar(4, getConnectionId(msg), &m_streamtable);
         m_streamtable.updateCountMaybeFlush();
     }
 
     void FlattenedRosWriter::RecordAllConnectionMetadata(){
         for (const auto * c: m_conns) {
             auto & conn = *c;
-            InsertToBuffer(0, conn.id, &m_connectiontable);
-            InsertToBuffer(1, conn.topic.size(), &m_connectiontable, conn.topic.data());
-            InsertToBuffer(2, conn.datatype.size(), &m_connectiontable, conn.datatype.data());
-            InsertToBuffer(3, conn.md5sum.size(), &m_connectiontable, conn.md5sum.data());
-            InsertToBuffer(4, conn.msg_def.size(), &m_connectiontable, conn.msg_def.data());
+            InsertScalar(0, conn.id, &m_connectiontable);
+            InsertData(1, conn.topic.size(), conn.topic.data(), &m_connectiontable);
+            InsertData(2, conn.datatype.size(), conn.datatype.data(), &m_connectiontable);
+            InsertData(3, conn.md5sum.size(), conn.md5sum.data(), &m_connectiontable);
+            InsertData(4, conn.msg_def.size(), conn.msg_def.data(), &m_connectiontable);
 
             auto cid = conn.header->find("callerid");
             assert(cid != conn.header->end());
-            InsertToBuffer(5, cid->second.size(), &m_connectiontable, cid->second.data());
+            InsertData(5, cid->second.size(), cid->second.data(), &m_connectiontable);
 
             m_connectiontable.updateCountMaybeFlush();
         }
@@ -244,8 +241,34 @@ using parquet::schema::GroupNode;
 
     void FlattenedRosWriter::WriteMessage(const rosbag::MessageInstance &msg){
         RecordMessageMetadata(msg);
-        GetHandler(msg).addRow(msg, m_buffer.data(),
-                               m_buffer.data() + m_buffer.size());
+
+        // prepare get raw message bytes and place them in buffer
+        auto buffer_len = msg.size();
+        m_buffer.clear();
+        m_buffer.reserve(buffer_len);
+
+        assert(m_buffer.size() == 0);
+        assert(m_buffer.capacity() >= msg.size());
+        m_buffer.resize(buffer_len);
+        ros::serialization::OStream stream(m_buffer.data(), msg.size());
+        msg.write(stream);
+
+        auto & handler = GetHandler(msg);
+        // insert the sequential id
+        InsertScalar(0, m_seqno, &handler.output_buf);
+
+        // handle all message specific fields
+        handler.addRow(1, msg, m_buffer.data(),
+                m_buffer.data() + m_buffer.size());
+
+        // the last two columns are the connection id, and the blob in ros msg format
+        // connection id is a way to locally preserve sensor id when there are multiple sensors
+        // of the same type.
+        // the char probably gets dictionary compressed.
+        InsertScalar(handler.output_buf.columns.size() - 2, getConnectionId(msg), &handler.output_buf)  ;
+        InsertData(handler.output_buf.columns.size() - 1, msg.size(), (char*)m_buffer.data(), &handler.output_buf);
+
+        handler.output_buf.updateCountMaybeFlush();
         m_seqno++;
     }
 
@@ -261,8 +284,6 @@ using parquet::schema::GroupNode;
         }
 
         m_streamtable.Close();
-
-
 
         m_loadscript << "CREATE TABLE IF NOT EXISTS Files (" << endl;
         m_loadscript << "  file_id INTEGER PRIMARY KEY DEFAULT currval(:fileseq)" << endl;
@@ -286,7 +307,7 @@ using parquet::schema::GroupNode;
                                                           msg.getMD5Sum(),
                                                           m_dirname,
                                                           msg.getMessageDefinition(),
-                                                              FLAGS_rows_per_group));
+                                                              FLAGS_rows_per_group, m_verbose));
             iter = m_pertype.find(msg.getDataType());
             assert(iter != m_pertype.end());
 

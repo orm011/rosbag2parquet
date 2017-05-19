@@ -15,7 +15,8 @@ public:
                         const std::string& md5sum,
                         const std::string& dirname,
                         const std::string& msgdefinition,
-                        int buffer_size);
+                        int buffer_size,
+                        bool verbose);
 
     enum Action {
             SKIP, // nested arrays show up on the blobs
@@ -24,7 +25,8 @@ public:
 
     const char* action_string[SAVE+1] = {"SKIP", "SAVE"};
 
-    void addRow(const rosbag::MessageInstance& msg,
+    void addRow(int starting_pos,
+                const rosbag::MessageInstance& msg,
                 const uint8_t *const buffer_start,
                 const uint8_t *const buffer_end);
 
@@ -59,6 +61,8 @@ public:
     std::string msgdefinition;
     std::string md5sum;
     std::string clean_tp;
+
+    bool m_verbose = false;
     RosIntrospection::ROSTypeList type_list;
     const RosIntrospection::ROSMessage* ros_message;
     TableBuffer output_buf;

@@ -1,32 +1,15 @@
 #include <iostream>
-#include <unordered_map>
-#include <unordered_set>
-#include <memory>
-#include <regex>
-#include <fstream>
-
 #include <boost/shared_ptr.hpp>
 #include <boost/algorithm/string.hpp>
-#include <boost/filesystem.hpp>
 
 #include <ros/time.h>
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 
-#include <gflags/gflags.h>
 #include "FlattenedRosWriter.h"
+#include "rosbag2parquet.h"
 
 using namespace std;
-
-// TODO: deal with -Wunused warning on validator
-bool validate_path(const char* flagname, const std::string& val){
-    if (val.empty()){
-        printf("No path provided for --%s\n", flagname);
-        return false;
-    }
-
-    return true;
-}
 
 /**
  * TODOs: (for this to be a tool for more people than just me)
@@ -54,57 +37,27 @@ bool validate_path(const char* flagname, const std::string& val){
  * 12) rosnode to save the parquet file at least for the blob?
  */
 
-DEFINE_string(bagfile, "", "path to input bagfile");
-//DEFINE_validator(bagfile, &validate_path);
-DEFINE_string(outdir, "", "path to the desired output location. An output folder will be created within.");
-//DEFINE_validator(outdir, &validate_path);
-DEFINE_int32(max_mbs, -1, "how much data (in MBs) to read before stopping, for testing");
 
-int main(int argc, char **argv)
+info rosbag2parquet(const std::string& bagfile, const std::string& opath,
+                    int max_mbs, bool verbose)
 {
-    gflags::SetUsageMessage("converts ROS bag files to a directory of parquet files. "
-                                    "There is one parquet file per type found in the bag");
-    gflags::ParseCommandLineFlags(&argc, &argv, true);
-    rosbag::Bag bag(FLAGS_bagfile, rosbag::bagmode::Read);
-    boost::filesystem::path opath(FLAGS_outdir);
-    boost::filesystem::path ifile(FLAGS_bagfile);
-
-    auto odir = ifile.filename();
-    odir.replace_extension().concat("_parquet_dir");
-    opath /= odir;
-
-    int i = 0;
-
-    while (boost::filesystem::exists(opath)){
-        ++i;
-        opath.replace_extension(to_string(i));
-    }
-
-    if(boost::filesystem::create_directory(opath))
-    {
-        cerr<< "creating output directory " << opath.native() << endl;
-    } else {
-        cerr << "ERROR: Failed to create output directory." << endl;
-        exit(1);
-    }
-
-    int64_t count = 0;
-    int64_t total_bytes = 0;
-    FlattenedRosWriter outputs(bag, opath.native());
-
+    rosbag::Bag bag(bagfile, rosbag::bagmode::Read);
     rosbag::View view;
     view.addQuery(bag);
+
+    FlattenedRosWriter outputs(bag, opath, verbose);
+
+    info result {};
+    result.bagname = bag.getFileName();
     for (const auto & msg : view) {
         outputs.WriteMessage(msg);
-        count+= 1;
-        total_bytes+= msg.size();
-        if (FLAGS_max_mbs > 0 && (total_bytes >> 20) >= FLAGS_max_mbs){
+        result.count+= 1;
+        result.size += msg.size();
+        if (max_mbs > 0 && (result.size >> 20) >= max_mbs){
             break;
         }
     }
 
     outputs.Close();
-    fprintf(stderr, "Wrote %ld ROS messages (%ld MB of ROS message blobs) to \n%s\n",
-            count, (total_bytes >> 20), opath.c_str());
-    //cout << count << endl;
+    return result;
 }
