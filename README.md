@@ -1,21 +1,22 @@
 # rosbag2parquet
-Rosbag2parquet transforms ROS .`bag` files into  query friendlier `.parquet` files
+Rosbag2parquet transforms ROS .`bag` files into a set of query friendlier `.parquet` files (one parquet table per type, plus two metadata tables).
+
+By splitting messages into tables based on data type, we avoid having small throughput sensors such as GPS and Imu be scattered among a sea of images and lidar, requiring full scans of all data to get a full view of a single sensor. This action by itself can help speed certain queries by a lot. Beyond that, we parse ros message fields and store them separately as well (only scalars and nested scalars for now). We store each table in parquet format.
+
+What is parquet?
+
+Parquet is a chunked-columnar format.  Chunked means a group of rows get placed together. Each chunk has statistics on each column (eg, min,max,count,count nulls) that allow one to decide whether a chunk has data of interest without scanning all rows to find out. Rosbag does something similar but only on a few select fields (timestamp, connection).  Like in rosbag, whole chunks then get compressed. Parquet supports a lot more chunk compression formats in the compute-size tradeoff spectrum than rosbag. (Eg. SNAPPY, LZO, GZIP).  
+
+Columnar means that within a chunk, bytes from the same fields across different rows get stored physically together. By making data columnar, it is possible to access a subset of the fields in a CompressedImage (eg, the header timestamp or the format string) before deciding whether to incur I/O for the image blob itself. This is useful especially in bandwidth constrained data access (eg accessing csail NFS through 1Gbit ethernet). In addition to bandwidth savings, in principle, the fields in the same columns are more compressible when laid out together, though we dont' know if this is a big deal in our case.  Additionally, Parquet supports per-column encoding schemes like Dictionary encoding, run length and delta. 
+
+We are still learning whether these things are a big advantage in practice (or whether the tooling works). We may decide an alternative format is better. Most of the implementation work here is really on the parsing of the bag, not on writing the parquet.
 
 Why parquet?  
 
-Parquet is a chunked-columnar format.  Chunked means a group of rows get placed together, columnar that the fields of those rows get stored in a columnar way. Each chunk has statistics on each column (min,max,count,count nulls) that allow one to decide whether a chunk has data of interest. Rosbag does something similar but only on a few select fields (timestamp, connection).  By making data columnar, it is possible to access a subset of the fields in a CompressedImage (eg, the header and frame_id) before deciding whether to incur I/O for the image blob itself. This is useful especially in bandwidth constrained data access (eg accessing csail NFS through 1Gbit ethernet).
+In addition to just seeming like a better option than rosbags. Parquet has a strong community: eg. pyarrow.parquet allows one to load individual chunks or columns from a parquet file into a pandas data frame. Dask, Spark, Impala  and Drill all allow one to query parquet files without loading.  Parquet reader tools such as pyarrow.parquet let one treaing multiple schema-compatible parquet files as a single dataset without requiring physically merging them. 
 
-Like in rosbag, whole chunks then get compressed. Parquet supports a lot more chunk compression formats in the compute-size tradeoff spectrum than rosbag. (Eg. SNAPPY, LZO, GZIP).  In principle, the fields in the same columns are more compressible placed together than as rows, though we dont' know if this is a big deal in our case.  Additionally Parquet supports per-column encoding schemes like Dictionary, run length and delta. These are there also to allow potentially faster querying.
+Some relational databases include foreign data wrappers for parquet files (eg, Vertica). In principle, postgres could have one implemented as well. These allow one to query with SQL without going through an extra load phase. 
 
-Parquet has support for accessing small parts of large parquet files (or collections of files) without having to pay a large penalty in reading lots of the file or an initialization penalty to gather lots of metadata. Rosbag takes a long time to initialize itself, apparently reading metadata at multiple locations. (TODO, show plots). 
-
-Multiple tools support parquet: eg. pyarrow loads parquet into arrow and pandas, and one can first pick which chunk of a large to load. Spark, Impala and Drill all allow one to query parquet files.   Some databases include foreign data wrapper for parquet files (eg, Vertica). In principle, postgres could have one implemented as well. This allows one to query with SQL without going through an extra load phase.   
-
-Parquet allows taking multiple parquet files' metadata and merging it. This can help go from multiple single trip files to a virtual multi-trip file without requiring physically merging them.
-
-Parquet also allows transparent flattening of datatypes. We are not using this component at the moment and it is unclear this is supported by most parquet reading tools, but with enough support on the read side, this may be a good way to handle the nesting inherent of rosmsg types. 
-
-We are still learning whether these things are a big advantage in practice (or whether the tooling works). We may decide an alternative format is better.
 
 Example:
 
@@ -101,9 +102,9 @@ total 41M
 ```
 
 *Current level of functionality:*
-* It handles all primitive types other than duration (including strings).
-* It handles byte arrays (eg, in Compressed_Image)
-* It handles fixed sized arrays of any primitive type
+* It parses all primitive ros message types.
+* It parses out arbitrarily nested fields (as long as none of the elements in the path is an array)
+* It keeps the blobs for the rest.
 
 ## Output description:
 A bagfile contains message data as well as bag metadata.
