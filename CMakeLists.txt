@@ -38,6 +38,8 @@ project(rosbag2parquet)
 find_package(rosbag_storage REQUIRED)
 find_package(roscpp_serialization REQUIRED)
 find_package(ros_type_introspection REQUIRED)
+include(cmake/FindArrow.cmake)
+include(cmake/FindParquet.cmake)
 
 #NOTE:
 #other deps assumed installed
@@ -115,3 +117,15 @@ target_link_libraries(rosbag2parquet_test gtest_main
         ${ros_type_introspection_LIBRARIES}
         )
 add_test(NAME all_tests COMMAND rosbag2parquet_test)
+
+
+# PYTHON Bindings
+include(cmake/boost-python.cmake)
+boost_python_module(rosbag2parquetpy
+    python/rosbag2parquet_wrapper.cpp)    
+target_link_libraries(rosbag2parquetpy boost_system boost_python glog)
+install(TARGETS rosbag2parquetpy
+  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+)
