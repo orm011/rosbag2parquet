@@ -21,8 +21,9 @@ if __name__ == "__main__":
         '--verbose', action='store_true', 
         required=False)
     args = parser.parse_args()
-    
-    output_dir = os.path.expanduser(args.output_dir)
+
+    basename = os.path.splitext(os.path.basename(args.filename))[0]
+    output_dir = os.path.join(os.path.expanduser(args.output_dir), basename + '_parquet_dir')
     try:
         os.makedirs(output_dir)
     except Exception, e:
