@@ -1,5 +1,5 @@
-// Author(s): Sudeep Pillai (spillai@csail.mit.edu), Nick Rypkema (rypkema@mit.edu)
-// License: MIT
+// Author(s): TODO
+// License: TODO
 
 #include <boost/python.hpp>
 #include <boost/python/suite/indexing/vector_indexing_suite.hpp>
