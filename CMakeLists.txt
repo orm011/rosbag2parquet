@@ -39,10 +39,10 @@ find_package(rosbag_storage REQUIRED)
 find_package(roscpp_serialization REQUIRED)
 find_package(ros_type_introspection REQUIRED)
 find_package(Boost 1.58.0 REQUIRED)
-# include(cmake/FindArrow.cmake)
+
+include(cmake/FindArrow.cmake)
 include(cmake/FindParquet.cmake)
-
-
+find_library(ARROW_LIB NAMES libarrow.a arrow)
 
 include_directories(${PARQUET_INCLUDE_DIR})
 # PARQUET_LIBRARIES PARQUET_ARROW_LIBRARIES
@@ -85,35 +85,32 @@ include_directories(
         ${roscpp_serialization_INCLUDE_DIRS}
         ${ros_type_introspection_INCLUDE_DIRS}
 )
-add_executable(rosbag_example.bin rosbag_example.cpp)
 
+# ROSBAG ============================================================
+add_executable(rosbag_example.bin rosbag_example.cpp)
 set(rosbag_LIBRARIES
         ${rosbag_storage_LIBRARIES}
         ${roscpp_serialization_LIBRARIES})
-
 target_link_libraries(rosbag_example.bin
         ${rosbag_LIBRARIES}
-        )
+                     )
 
-set(parquet_LIBRARIES parquet arrow arrow_io arrow_ipc ${PARQUET_ARROW_LIBRARIES} ${PARQUET_LIBRARIES})
-add_executable(parquet_example.bin parquet_example.cpp utils.h)
+# PARQUET ============================================================
+# set(parquet_LIBRARIES
+#     # /home/spillai/anaconda/envs/botdb_env/lib/libparquet_arrow.a
+#     # /home/spillai/anaconda/envs/botdb_env/lib/libparquet.a)
+#     /home/spillai/anaconda/envs/botdb_env/lib/libarrow.so
+# ${PARQUET_ARROW_LIBRARIES} ${PARQUET_LIBRARIES})
+set(parquet_LIBRARIES parquet arrow arrow_io)
 
 #if asan debugging, link to asan as well
+add_executable(parquet_example.bin parquet_example.cpp utils.h)
 target_link_libraries(parquet_example.bin
         ${parquet_LIBRARIES}
         )
 
-add_executable(rosbag2parquet.bin
-        FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp
-        MessageTable.h TableBuffer.cpp TableBuffer.h rosbag2parquet.cpp rosbag2parquet.h main.cpp)
-target_link_libraries(rosbag2parquet.bin
-        gflags
-        ${rosbag_LIBRARIES}
-        ${parquet_LIBRARIES}
-        ${ros_type_introspection_LIBRARIES}
-        )
-
-add_library(rosbag2parquet SHARED
+# rosbag2parquet library =============================================
+add_library(rosbag2parquet  SHARED
             FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp MessageTable.h
             TableBuffer.cpp TableBuffer.h rosbag2parquet.cpp rosbag2parquet.h)
 target_link_libraries(rosbag2parquet gtest_main
@@ -123,26 +120,34 @@ target_link_libraries(rosbag2parquet gtest_main
         ${ros_type_introspection_LIBRARIES}
         )
 
+# rosbag2parquet executable ==========================================
+add_executable(rosbag2parquet.bin main.cpp)
+target_link_libraries(rosbag2parquet.bin
+                      rosbag2parquet
+                      gflags
+                      ${rosbag_LIBRARIES}
+                      ${parquet_LIBRARIES}
+                      ${ros_type_introspection_LIBRARIES}
+                     )
+
+# rosbag2parquet test ================================================
 add_executable(rosbag2parquet_test
                rosbag2parquet_test.cpp)
-# FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp MessageTable.h
-# TableBuffer.cpp TableBuffer.h rosbag2parquet.cpp rosbag2parquet.h)
-
 target_link_libraries(rosbag2parquet_test gtest_main
                       rosbag2parquet
                       gflags
-        ${rosbag_LIBRARIES}
-        ${parquet_LIBRARIES}
-        ${ros_type_introspection_LIBRARIES}
-        )
+                      ${rosbag_LIBRARIES}
+                      ${parquet_LIBRARIES}
+                      ${ros_type_introspection_LIBRARIES}
+                     )
 add_test(NAME all_tests COMMAND rosbag2parquet_test)
 
 
-# PYTHON Bindings
+# rosbag2parquet python ==============================================
 include(cmake/boost-python.cmake)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 boost_python_module(rosbag2parquetpy
-    python/rosbag2parquet_wrapper.cpp rosbag2parquet.cpp)    
+    python/rosbag2parquet_wrapper.cpp)    
 target_link_libraries(rosbag2parquetpy rosbag2parquet boost_system boost_python glog
                       gflags
                       ${rosbag_LIBRARIES}
