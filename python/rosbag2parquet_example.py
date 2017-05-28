@@ -15,6 +15,9 @@ if __name__ == "__main__":
         '-o', '--output_dir', type=str, required=True,
         help="Output parquet directory")
     parser.add_argument(
+        '-m', '--max_mbs', type=int, required=False,
+        default=-1, help="Write maximum MBs (default -1)")
+    parser.add_argument(
         '--verbose', action='store_true', 
         required=False)
     args = parser.parse_args()
@@ -26,5 +29,5 @@ if __name__ == "__main__":
         print('Could not create path: {}'.format(e))
         sys.exit(1)
         
-    info = rosbag2parquet(os.path.expanduser(args.filename), output_dir, max_mbs=100, verbose=args.verbose)
+    info = rosbag2parquet(os.path.expanduser(args.filename), output_dir, max_mbs=args.max_mbs, verbose=args.verbose)
     print('info bagname: {}, size: {}, count: {}'.format(info.bagname, info.size, info.count))
