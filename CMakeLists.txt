@@ -38,8 +38,15 @@ project(rosbag2parquet)
 find_package(rosbag_storage REQUIRED)
 find_package(roscpp_serialization REQUIRED)
 find_package(ros_type_introspection REQUIRED)
+find_package(Boost 1.58.0 REQUIRED)
 include(cmake/FindArrow.cmake)
 include(cmake/FindParquet.cmake)
+
+
+
+include_directories(${PARQUET_INCLUDE_DIR})
+# PARQUET_LIBRARIES PARQUET_ARROW_LIBRARIES
+
 
 #NOTE:
 #other deps assumed installed
@@ -119,13 +126,13 @@ target_link_libraries(rosbag2parquet_test gtest_main
 add_test(NAME all_tests COMMAND rosbag2parquet_test)
 
 
-# PYTHON Bindings
-include(cmake/boost-python.cmake)
-boost_python_module(rosbag2parquetpy
-    python/rosbag2parquet_wrapper.cpp)    
-target_link_libraries(rosbag2parquetpy boost_system boost_python glog)
-install(TARGETS rosbag2parquetpy
-  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
-  LIBRARY DESTINATION lib
-  ARCHIVE DESTINATION lib
-)
+# # PYTHON Bindings
+# include(cmake/boost-python.cmake)
+# boost_python_module(rosbag2parquetpy
+#     python/rosbag2parquet_wrapper.cpp)    
+# target_link_libraries(rosbag2parquetpy boost_system boost_python glog)
+# install(TARGETS rosbag2parquetpy
+#   PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+#   LIBRARY DESTINATION lib
+#   ARCHIVE DESTINATION lib
+# )
