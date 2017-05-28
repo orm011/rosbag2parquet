@@ -39,7 +39,7 @@ find_package(rosbag_storage REQUIRED)
 find_package(roscpp_serialization REQUIRED)
 find_package(ros_type_introspection REQUIRED)
 find_package(Boost 1.58.0 REQUIRED)
-include(cmake/FindArrow.cmake)
+# include(cmake/FindArrow.cmake)
 include(cmake/FindParquet.cmake)
 
 
@@ -76,7 +76,7 @@ endif()
 
 
 add_compile_options(
-        -Wall -Werror
+        -Wall # -Werror
         -fno-omit-frame-pointer
         -g)
 
@@ -95,7 +95,7 @@ target_link_libraries(rosbag_example.bin
         ${rosbag_LIBRARIES}
         )
 
-set(parquet_LIBRARIES parquet arrow arrow_io)
+set(parquet_LIBRARIES parquet arrow arrow_io arrow_ipc ${PARQUET_ARROW_LIBRARIES} ${PARQUET_LIBRARIES})
 add_executable(parquet_example.bin parquet_example.cpp utils.h)
 
 #if asan debugging, link to asan as well
@@ -113,12 +113,24 @@ target_link_libraries(rosbag2parquet.bin
         ${ros_type_introspection_LIBRARIES}
         )
 
+add_library(rosbag2parquet SHARED
+            FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp MessageTable.h
+            TableBuffer.cpp TableBuffer.h rosbag2parquet.cpp rosbag2parquet.h)
+target_link_libraries(rosbag2parquet gtest_main
+        gflags
+        ${rosbag_LIBRARIES}
+        ${parquet_LIBRARIES}
+        ${ros_type_introspection_LIBRARIES}
+        )
+
 add_executable(rosbag2parquet_test
-        rosbag2parquet_test.cpp FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp MessageTable.h
-        TableBuffer.cpp TableBuffer.h rosbag2parquet.cpp rosbag2parquet.h)
+               rosbag2parquet_test.cpp)
+# FlattenedRosWriter.cpp FlattenedRosWriter.h MessageTable.cpp MessageTable.h
+# TableBuffer.cpp TableBuffer.h rosbag2parquet.cpp rosbag2parquet.h)
 
 target_link_libraries(rosbag2parquet_test gtest_main
-        gflags
+                      rosbag2parquet
+                      gflags
         ${rosbag_LIBRARIES}
         ${parquet_LIBRARIES}
         ${ros_type_introspection_LIBRARIES}
@@ -126,13 +138,19 @@ target_link_libraries(rosbag2parquet_test gtest_main
 add_test(NAME all_tests COMMAND rosbag2parquet_test)
 
 
-# # PYTHON Bindings
-# include(cmake/boost-python.cmake)
-# boost_python_module(rosbag2parquetpy
-#     python/rosbag2parquet_wrapper.cpp)    
-# target_link_libraries(rosbag2parquetpy boost_system boost_python glog)
-# install(TARGETS rosbag2parquetpy
-#   PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
-#   LIBRARY DESTINATION lib
-#   ARCHIVE DESTINATION lib
-# )
+# PYTHON Bindings
+include(cmake/boost-python.cmake)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+boost_python_module(rosbag2parquetpy
+    python/rosbag2parquet_wrapper.cpp rosbag2parquet.cpp)    
+target_link_libraries(rosbag2parquetpy rosbag2parquet boost_system boost_python glog
+                      gflags
+                      ${rosbag_LIBRARIES}
+                      ${parquet_LIBRARIES}
+                      ${ros_type_introspection_LIBRARIES}
+                     )
+install(TARGETS rosbag2parquetpy
+  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+)

@@ -4,6 +4,7 @@
 #include <boost/python.hpp>
 #include <boost/python/suite/indexing/vector_indexing_suite.hpp>
 #include <boost/python/stl_iterator.hpp>
+#include "rosbag2parquet.h"
 
 namespace py = boost::python;
 
