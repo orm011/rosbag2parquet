@@ -15,7 +15,6 @@ public:
                         const std::string& md5sum,
                         const std::string& dirname,
                         const std::string& msgdefinition,
-                        int buffer_size,
                         bool verbose);
 
     enum Action {

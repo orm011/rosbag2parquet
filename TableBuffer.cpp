@@ -8,11 +8,9 @@
 using namespace std;
 
 TableBuffer::TableBuffer(const string& dirname, const string & tablename,
-                         int buffer_rows,
                         const parquet::schema::NodeVector& fields,
                         bool verbose) :
             tablename(tablename),
-            buffer_rows(buffer_rows),
             m_verbose(verbose)
     {
 
@@ -113,9 +111,9 @@ TableBuffer::TableBuffer(const string& dirname, const string & tablename,
         out << ") FROM :abs_path PARQUET DIRECT NO COMMIT;" << endl << endl;
     }
 
-    void TableBuffer::FlushBuffers(){
+    void TableBuffer::FlushBuffers() {
         auto batch_size = rows_since_last_reset;
-        if (batch_size == 0){
+        if (batch_size == 0) {
             return;
         }
 
@@ -203,6 +201,7 @@ TableBuffer::TableBuffer(const string& dirname, const string & tablename,
 
         // update auxiliary classes
         rows_since_last_reset = 0;
+        bytes_since_last_reset = 0;
         rg_writer->Close();
     }
 
@@ -218,7 +217,7 @@ TableBuffer::TableBuffer(const string& dirname, const string & tablename,
         total_rows += 1;
 
         // check for batch size
-        if (rows_since_last_reset == buffer_rows) {
+        if (bytes_since_last_reset >= row_group_byte_limit) {
             FlushBuffers();
         }
     }

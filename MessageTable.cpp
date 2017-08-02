@@ -306,7 +306,6 @@ MessageTable::MessageTable(const string& rostypename,
                            const string& md5sum,
                            const string& dirname,
                            const string& msgdefinition,
-                           int buffer_size,
                             bool verbose)
         : rostypename(rostypename),
           msgdefinition(msgdefinition),
@@ -357,7 +356,7 @@ MessageTable::MessageTable(const string& rostypename,
         }
     }
 
-    this->output_buf = TableBuffer(dirname, clean_tp, buffer_size, parquet_fields, m_verbose);
+    this->output_buf = TableBuffer(dirname, clean_tp, parquet_fields, m_verbose);
 }
 
 

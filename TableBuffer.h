@@ -17,7 +17,6 @@ public:
         TableBuffer() = default;
 
         explicit TableBuffer(const std::string& dirname, const std::string & tablename,
-                    int buffer_rows,
                     const parquet::schema::NodeVector& fields, bool verbose) ;
 
         std::string tablename;
@@ -26,9 +25,12 @@ public:
         std::shared_ptr<arrow::io::FileOutputStream> out_file;
         std::shared_ptr<parquet::ParquetFileWriter> file_writer;
 
-        int buffer_rows;
         int total_rows = 0;
         int rows_since_last_reset = 0;
+        int bytes_since_last_reset = 0;
+        static const int row_group_byte_limit = 128 << 20;
+        // 200 MB chunks (20 datatypes => 4 GB of buffering needed in worst case)
+        // 20 columns => (avg column size is 10 MB, but min may be much smaller...).
         bool m_verbose = false;
 
         using column_buffer_t = std::pair<std::vector<char>, std::vector<char>>;
@@ -38,8 +40,6 @@ public:
         void FlushBuffers();
         void Close();
         void updateCountMaybeFlush();
-
-
 };
 
 

@@ -14,8 +14,6 @@
 
 #include "FlattenedRosWriter.h"
 
-DEFINE_int32(rows_per_group, 4000, "max rows per parquet group");
-
 using namespace std;
 using parquet::Type;
 using parquet::LogicalType;
@@ -99,7 +97,7 @@ using parquet::schema::GroupNode;
                                     parquet::LogicalType::UINT_32)
         );
 
-        m_streamtable = TableBuffer(m_dirname, "Messages", FLAGS_rows_per_group, parquet_fields, m_verbose);
+        m_streamtable = TableBuffer(m_dirname, "Messages", parquet_fields, m_verbose);
         m_streamtable.EmitCreateStatement(m_loadscript);
     }
 
@@ -150,12 +148,13 @@ using parquet::schema::GroupNode;
         );
 
 
-        m_connectiontable = TableBuffer(m_dirname, "Connections", FLAGS_rows_per_group, parquet_fields, m_verbose);
+        m_connectiontable = TableBuffer(m_dirname, "Connections", parquet_fields, m_verbose);
         m_connectiontable.EmitCreateStatement(m_loadscript);
     }
 
     // only works for simple types
     void InsertData(int bufno, size_t len, const char* data, TableBuffer* buf){
+        buf->bytes_since_last_reset += static_cast<int>(len);
         assert(data);
         assert(len < (1UL<<31)); // for things coming out as strings
         auto len32 = (uint32_t) len;
@@ -176,6 +175,7 @@ using parquet::schema::GroupNode;
 
     template <typename T>
     void InsertScalar(int bufno, T val, TableBuffer* buf){
+        buf->bytes_since_last_reset += static_cast<int>(sizeof(val));
         // assert this is a struct of some kind at most?
         static_assert(sizeof(T) == 4 || sizeof(T) == 8, "make sure this works for more complex types before removing");
         auto & vec = buf->columns[bufno].first;
@@ -306,8 +306,7 @@ using parquet::schema::GroupNode;
             m_pertype.emplace(msg.getDataType(), MessageTable(msg.getDataType(),
                                                           msg.getMD5Sum(),
                                                           m_dirname,
-                                                          msg.getMessageDefinition(),
-                                                              FLAGS_rows_per_group, m_verbose));
+                                                          msg.getMessageDefinition(), m_verbose));
             iter = m_pertype.find(msg.getDataType());
             assert(iter != m_pertype.end());
 
