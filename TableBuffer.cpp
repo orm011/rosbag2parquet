@@ -200,6 +200,10 @@ TableBuffer::TableBuffer(const string& dirname, const string & tablename,
         }
 
         // update auxiliary classes
+        if (learned_row_size < 0){
+            learned_row_size = rows_since_last_reset;
+        }
+
         rows_since_last_reset = 0;
         bytes_since_last_reset = 0;
         rg_writer->Close();
@@ -217,7 +221,8 @@ TableBuffer::TableBuffer(const string& dirname, const string & tablename,
         total_rows += 1;
 
         // check for batch size
-        if (bytes_since_last_reset >= row_group_byte_limit) {
+        if (rows_since_last_reset == learned_row_size
+            || (learned_row_size < 0 && bytes_since_last_reset >= row_group_byte_limit)) {
             FlushBuffers();
         }
     }
