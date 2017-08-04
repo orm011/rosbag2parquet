@@ -38,7 +38,6 @@ public:
         using column_buffer_t = std::pair<std::vector<char>, std::vector<char>>;
         std::vector<column_buffer_t> columns;
 
-        void EmitCreateStatement(std::ostream& out) ;
         void FlushBuffers();
         void Close();
         void updateCountMaybeFlush();

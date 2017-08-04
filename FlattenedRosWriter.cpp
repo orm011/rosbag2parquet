@@ -24,15 +24,13 @@ using parquet::schema::GroupNode;
     FlattenedRosWriter::FlattenedRosWriter(const rosbag::Bag& bag,
                        const string& dirname, bool verbose)
             : m_bagname(bag.getFileName()), m_dirname(dirname),
-              m_loadscript(dirname + "/vertica_load_tables.sql"),
               m_verbose(verbose)
     {
 
         rosbag::View v;
         v.addQuery(bag);
         m_conns = v.getConnections();
-
-        InitLoadScript();
+        
         InitStreamTable();
         InitConnectionTable();
 
@@ -46,18 +44,6 @@ using parquet::schema::GroupNode;
             (void)ret;  // use var
             assert(ret.second);
         }
-    }
-
-    void FlattenedRosWriter::InitLoadScript() {
-        m_loadscript << "CREATE SCHEMA IF NOT EXISTS :schema;" << endl;
-        m_loadscript << "set search_path to :schema, public;" << endl << endl;
-        m_loadscript << "-- using max var type lengths allowed by vertica before it truncates" << endl;
-        m_loadscript << "\\set max_varchar 65000" << endl;
-        m_loadscript << "\\set max_long_varbinary 32000000" << endl;
-        m_loadscript << "--  need to pass -v fileseq=<file sequence> (create a sequence if needed)" << endl;
-        m_loadscript << "\\set fileseq '\\'':fileseq'\\''" << endl;
-        m_loadscript << "-- gets a unique sequence number and begins transaction" << endl;
-        m_loadscript << "SELECT nextval(:fileseq);" << endl << endl;
     }
 
     void FlattenedRosWriter::InitStreamTable()
@@ -98,7 +84,6 @@ using parquet::schema::GroupNode;
         );
 
         m_streamtable = TableBuffer(m_dirname, "Messages", parquet_fields, m_verbose);
-        m_streamtable.EmitCreateStatement(m_loadscript);
     }
 
 
@@ -149,7 +134,6 @@ using parquet::schema::GroupNode;
 
 
         m_connectiontable = TableBuffer(m_dirname, "Connections", parquet_fields, m_verbose);
-        m_connectiontable.EmitCreateStatement(m_loadscript);
     }
 
     // only works for simple types
@@ -284,17 +268,6 @@ using parquet::schema::GroupNode;
         }
 
         m_streamtable.Close();
-
-        m_loadscript << "CREATE TABLE IF NOT EXISTS Files (" << endl;
-        m_loadscript << "  file_id INTEGER PRIMARY KEY DEFAULT currval(:fileseq)" << endl;
-        m_loadscript << ", file_load_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP" << endl;
-        m_loadscript << ", file_path VARCHAR(:max_varchar) NOT NULL" << endl;
-        m_loadscript << ");" << endl << endl;
-        m_loadscript << "INSERT INTO files (file_path) VALUES ( '" << m_bagname << "' );" << endl << endl;
-
-        m_loadscript << "-- these were all the tables" << endl;
-        m_loadscript << "COMMIT;" << endl;
-        m_loadscript.close();
     }
 
     MessageTable& FlattenedRosWriter::GetHandler(const rosbag::MessageInstance &msg) {
@@ -309,9 +282,6 @@ using parquet::schema::GroupNode;
                                                           msg.getMessageDefinition(), m_verbose));
             iter = m_pertype.find(msg.getDataType());
             assert(iter != m_pertype.end());
-
-            // emit create statement to load data easily
-            iter->second.output_buf.EmitCreateStatement(m_loadscript);
         }
 
         assert(msg.getMD5Sum() == iter->second.md5sum);

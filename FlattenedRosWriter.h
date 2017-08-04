@@ -20,7 +20,6 @@ public:
 private:
     void InitConnectionTable();
     void InitStreamTable();
-    void InitLoadScript();
 
     MessageTable& GetHandler(const rosbag::MessageInstance &msg);
     int getConnectionId(const rosbag::MessageInstance& msg) const;
@@ -31,7 +30,6 @@ private:
     const std::string m_bagname;
     uint64_t m_seqno = 0;
     const std::string m_dirname;
-    std::ofstream m_loadscript;
     std::vector<const rosbag::ConnectionInfo*> m_conns;
     std::unordered_map<void*, std::pair<bool, const rosbag::ConnectionInfo*>> m_conns_by_header;
     std::unordered_map<std::string, MessageTable> m_pertype;

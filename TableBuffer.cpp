@@ -57,60 +57,6 @@ TableBuffer::TableBuffer(const string& dirname, const string & tablename,
         columns.resize(parquet_schema->field_count());
     }
 
-    void TableBuffer::EmitCreateStatement(ostream& out) {
-        out << "CREATE TABLE IF NOT EXISTS "
-            << tablename << " (" << endl;
-
-        out << "  ID AUTO_INCREMENT PRIMARY KEY -- redundant, but helps load data substantially faster" << endl;
-        out << ", file_id INTEGER NOT NULL DEFAULT currval(:fileseq)" << endl;
-
-        string header_keyword = "header_stamp_nsec";
-        string message_keyword = "time_nsec";
-
-        for (int i = 0; i < parquet_schema->field_count(); ++i){
-            auto &fld = parquet_schema->field(i);
-            out << ", ";
-            out << fld->name() << " ";
-            assert(fld->is_primitive());
-            assert(!fld->is_repeated());
-            out << GetVerticaType(
-                    static_cast<parquet::schema::PrimitiveNode*>(fld.get())) << endl;
-
-            // any table with a header will also get a timestamp
-            if (memcmp(fld->name().data(), header_keyword.data(), header_keyword.size()) == 0){
-                out << ", header_timestamp TIMESTAMPTZ NOT NULL default "
-                        "to_timestamp(header_stamp_sec + header_stamp_nsec*1e-9)";
-                out << endl;
-            }
-
-            // message table timestamp
-            if (memcmp(fld->name().data(), message_keyword.data(), message_keyword.size()) == 0){
-                out << ", timestamp TIMESTAMPTZ NOT NULL default "
-                        "to_timestamp(time_sec + time_nsec*1e-9)";
-                out << endl;
-            }
-        }
-
-
-        out << ");" << endl << endl;
-
-        // emit client statement to set a variable
-        // allows us to run with -v path=PATH
-        out << "\\set abs_path '\\'':path:'/";
-        out << boost::filesystem::path(filename).filename().native();
-        out << "\\''" << endl << endl;
-
-        out << "COPY " << tablename << "(" << endl;
-        for (int i = 0; i < parquet_schema->field_count(); ++i){
-            auto &fld = parquet_schema->field(i);
-            if (i > 0) {
-                out << ", ";
-            }
-            out << fld->name() << endl;
-        }
-        out << ") FROM :abs_path PARQUET DIRECT NO COMMIT;" << endl << endl;
-    }
-
     void TableBuffer::FlushBuffers() {
         auto batch_size = rows_since_last_reset;
         if (batch_size == 0) {

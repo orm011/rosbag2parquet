@@ -328,6 +328,7 @@ MessageTable::MessageTable(const string& rostypename,
                                                  parquet::Repetition::REQUIRED,
                                                  parquet::Type::INT64));
 
+
     toParquetSchema("", *ros_message, &parquet_fields);
 
     parquet_fields.push_back(
