@@ -1,9 +1,9 @@
 # rosbag2parquet
-Rosbag2parquet transforms ROS .`bag` files into a set of query friendlier `.parquet` files (one parquet table per type, plus two metadata tables).
+Rosbag2parquet transforms ROS .`bag` files into a set of query friendlier `.parquet` files (one parquet table per message type, and two auxiliary tables with per-message and connection info)
 
-By splitting messages into tables based on data type, we avoid having small throughput sensors such as GPS and Imu be scattered among a sea of images and lidar, requiring full scans of all data to get a full view of a single sensor. This action by itself can help speed certain queries by a lot. Beyond that, we parse ros message fields and store them separately as well (only scalars and nested scalars for now). We store each table in parquet format.
+By splitting messages into tables based on data type, we avoid having small throughput sensors such as GPS and Imu be scattered among a sea of images and lidar, requiring scans of most data to get a full view of a single sensor. This action by itself can help speed certain queries by a lot. Beyond that, we parse ros message fields and store them separately as well (only scalars and nested scalars for now). 
 
-What is parquet?
+# What is parquet?
 
 Parquet is a chunked-columnar format.  Chunked means a group of rows get placed together. Each chunk has statistics on each column (eg, min,max,count,count nulls) that allow one to decide whether a chunk has data of interest without scanning all rows to find out. Rosbag does something similar but only on a few select fields (timestamp, connection).  Like in rosbag, whole chunks then get compressed. Parquet supports a lot more chunk compression formats in the compute-size tradeoff spectrum than rosbag. (Eg. SNAPPY, LZO, GZIP).  
 
@@ -11,12 +11,11 @@ Columnar means that within a chunk, bytes from the same fields across different 
 
 We are still learning whether these things are a big advantage in practice (or whether the tooling works). We may decide an alternative format is better. Most of the implementation work here is really on the parsing of the bag, not on writing the parquet.
 
-Why parquet?  
+# Why parquet?  
 
-In addition to just seeming like a better option than rosbags. Parquet has a strong community: eg. pyarrow.parquet allows one to load individual chunks or columns from a parquet file into a pandas data frame. Dask, Spark, Impala  and Drill all allow one to query parquet files without loading.  Parquet reader tools such as pyarrow.parquet let one treaing multiple schema-compatible parquet files as a single dataset without requiring physically merging them. 
+Parquet has a strong community: eg. `pyarrow.parquet` lets you load individual chunks or columns from a parquet file into a pandas data frame. Spark, Dask, Impala and Drill all allow you to query parquet files without loading. Multiple compatible parquet files can be treated as a single file.
 
 Some relational databases include foreign data wrappers for parquet files (eg, Vertica). In principle, postgres could have one implemented as well. These allow one to query with SQL without going through an extra load phase. 
-
 
 Example:
 
@@ -101,10 +100,10 @@ total 41M
  28K vertica_load_tables.sql
 ```
 
-*Current level of functionality:*
+### Current level of functionality:
 * It parses all primitive ros message types.
 * It parses out arbitrarily nested fields (as long as none of the elements in the path is an array)
-* It keeps the blobs for the rest.
+* It keeps the raw blobs around for the rest, so you don't lose any data. The connections table keeps type information you can use to rebuild the msg type.
 
 ## Output description:
 A bagfile contains message data as well as bag metadata.
@@ -121,68 +120,43 @@ to hold bag metadata.
 of that type.  Each message on each table gets a unique `seqno` that identifies
  it with its original position within the bagfile.
 
-Additionally, we are also generating a `.sql` script with all
-the code needed to load the output `.parquet` files into 
-Vertica database tables, including:
- * generating `create` statements for each of the tables.
- * transforming `ros::Time` to `SQL timestamp` types. 
- * uniquely identify records from multiple trips loaded
- onto the same database
-
 ## Current handling of nested types:
 * rosbag2parquet converts all rosmsg primitive types to parquet versions, including strings.
-* rosbag2parquet flattens nested structs (eg Headers)
-* rosbag2parquet skips array types of any kind (they get preserved as a blob, but are not flattened/queriable at the moment)
+* rosbag2parquet traverses and flattens nested structs (eg Headers)
+* rosbag2parquet skips array types of any kind (they get preserved as a blob, but are not flattened/queriable at the moment).
 
-Handling all of those is well within our reach, but
-such data is not being used by our current queries. 
-Feel free to request it if you need it,
-preferably with a python program we can run to make sure
-the result from the `.bag` looks just like the result
-from the `.parquet` data.
-
-## Testing: 
-We could use a small test to verify we handle different ros types well.
-
-Currently we test this end to end on some bagfiles we have, and run
-queries on those files that we know have certain results.
+Feel free to request it if you need it, preferably with a python program we can run to make sure
+the result from the `.bag` looks just like the result from the `.parquet` data, or better yet, submit a patch and test case.
 
 ## Performance:
-Given enough IO bandwidth, the current implementation
-bottlenecks on a single CPU consuming a non-compressed
-30GB bagfile at about 80MB/s (and writing ~ 1/5  of that 
-output size in SNAPPY format, depending on the types, but recall
-we are skipping laser scan data). We haven't done
-any tuning on the parquet side in terms of customizing
-encoding.
+
+The current implementation is not pipelined, profiling has shown there are IO-bound intervals followed by CPU bound intervals.  The main CPU waste at the moment comes from the ros-introspection-library, which we are using to model datatypes. 
+
 
 ## Dependencies:
-TODO: Would love to clean this up to make it easy to build.
 
 ### GoogleTest: 
 cmake should download the repo and handle this without extra inolvement.
 
 ### Packages with Find*.cmake:
 See CMakefile.  These will get found by cmake or reported 
-at config time as failures. Ros kinetic is found this way.
+at config time as failures. Ros kinetic is found this way. Ros type introspection is available in ubuntu.
 
 ### Packages without a Find*.cmake:
-Lack of them will simply show up  as compile/link errors.
 * Boost Filesystem (there must be a cmake for this, right?)
 * Google flags 
 * parquet-cpp 1.0 and apache arrow (you probably want to build this one 
   from srouce. Arrow gets downloaded and built for it)
-o satisfy them you need to make sure they are in well known paths
+
+Lack of them will simply show up as compile/link errors.
+To satisfy them you need to make sure they are in well known paths
 or the right files show up in in CPLUS_INCLUDE_PATH, LIBRARY_PATH, LD_LIBRARY_PATH.
 
-### Non-packaged software:
-We have a dependency on ros_instrospection msg parsing and type descriptions.
+Here's my bashrc change to have the pyarrow libraries:
 
-To remove, we can write a tool to convert ros message definitions (text) into a C struct description. We should be able to go from that C struct to a parquet Schema object,  and we should be able to use that C struct to direct the parsing of a message.
-
-Forked version available at: https://github.com/orm011/ros_type_introspection
-
-To satisfy this one we need to download the git repo, build it and provide something like the following:
-
-### Configuring build:
- ```cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH=/home/orm/ros_type_introspection/build/devel/share/ros_type_introspection/cmake/ ..```
+```
+# needed for the rosbag loader
+export CPLUS_INCLUDE_PATH=/home/orm/parquet-cpp/build/arrow_ep/src/arrow_ep-install/include/:/usr/local/include/:$CPLUS_INCLUDE_PATH
+export LIBRARY_PATH=/home/orm/parquet-cpp/build/arrow_ep/src/arrow_ep-install/lib/:/usr/local/lib/:$LIBRARY_PATH
+export LD_LIBRARY_PATH=/home/orm/parquet-cpp/build/arrow_ep/src/arrow_ep-install/lib/:/usr/local/lib/:$LD_LIBRARY_PATH
+```
