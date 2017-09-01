@@ -130,8 +130,12 @@ the result from the `.bag` looks just like the result from the `.parquet` data, 
 
 ## Performance:
 
-The current implementation is not pipelined, profiling has shown there are IO-bound intervals followed by CPU bound intervals.  The main CPU waste at the moment comes from the ros-introspection-library, which we are using to model datatypes. 
+The current implementation is not pipelined, profiling has shown there are IO-bound intervals followed by CPU bound intervals.  The main CPU waste at the moment comes from the ros-introspection-library, which we are using to model datatypes.
 
+### Pet projects that could be good pull requests:
+  * Replace the ros-type-introspection type representation with a lighter-weight one that can be queried easily at parse time and uses no strings.
+  * Allow us to leave heavy-weight objects (> 1 MB) in the bag itself, storing a pointer and compression state to remove chunk. This would allow us to not pay the price of copying that data.
+  * Asynchronously prefetch bag contents from storage (remove performance dependency on disk latency from the picture)
 
 ## Dependencies:
 
